@@ -228,6 +228,9 @@ public:
     // The information may be outdated already.
     virtual bool is_leader() = 0;
 
+    // Return true is the server is a voter in its current config
+    virtual bool can_vote() = 0;
+
     // The function should be called periodically to advance logical clock.
     virtual void tick() = 0;
 

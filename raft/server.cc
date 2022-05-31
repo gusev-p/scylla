@@ -90,6 +90,7 @@ public:
     std::pair<index_t, term_t> log_last_idx_term() override;
     void elapse_election() override;
     bool is_leader() override;
+    bool can_vote() override;
     void tick() override;
     raft::server_id id() const override;
     void set_applier_queue_max_size(size_t queue_max_size) override;
@@ -1585,6 +1586,10 @@ std::pair<index_t, term_t> server_impl::log_last_idx_term() {
 
 bool server_impl::is_leader() {
     return _fsm->is_leader();
+}
+
+bool server_impl::can_vote() {
+    return _fsm->get_configuration().can_vote(_id);
 }
 
 void server_impl::elapse_election() {
