@@ -32,6 +32,12 @@
 
 class row;
 
+namespace db {
+namespace functions {
+    class function;
+}
+}
+
 namespace secondary_index {
 class index;
 class secondary_index_manager;
@@ -50,12 +56,6 @@ class query_options;
 namespace selection {
     class selection;
 } // namespace selection
-
-namespace functions {
-
-class function;
-
-}
 
 namespace restrictions {
     class restriction;
@@ -275,7 +275,7 @@ struct column_mutation_attribute {
 };
 
 struct function_call {
-    std::variant<functions::function_name, shared_ptr<functions::function>> func;
+    std::variant<functions::function_name, shared_ptr<db::functions::function>> func;
     std::vector<expression> args;
 
     // 0-based index of the function call within a CQL statement.
@@ -498,6 +498,13 @@ extern bool is_supported_by(const expression&, const secondary_index::index&);
 /// indices; otherwise, use only global indices.
 extern bool has_supporting_index(
         const expression&, const secondary_index::secondary_index_manager&, allow_local_index allow_local);
+
+// Looks at each column indivudually and checks whether some index can support restrictions on this single column.
+// Expression has to consist only of single column restrictions.
+extern bool index_supports_some_column(
+    const expression&,
+    const secondary_index::secondary_index_manager&,
+    allow_local_index allow_local);
 
 extern sstring to_string(const expression&);
 
@@ -763,6 +770,8 @@ sstring get_columns_in_commons(const expression& a, const expression& b);
 bytes_opt value_for(const column_definition&, const expression&, const query_options&);
 
 bool contains_multi_column_restriction(const expression&);
+
+bool has_only_eq_binops(const expression&);
 } // namespace expr
 
 } // namespace cql3

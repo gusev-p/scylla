@@ -3630,7 +3630,7 @@ class scylla_fiber(gdb.Command):
 
             backwards_fiber = self._walk(self._walk_backward, this_task[0], args.max_depth, args.scanned_region_size, using_seastar_allocator, args.verbose)
 
-            for i, (tptr, vptr, name) in enumerate(backwards_fiber):
+            for i, (tptr, vptr, name) in enumerate(reversed(backwards_fiber)):
                 gdb.write("#{:<2d} (task*) 0x{:016x} 0x{:016x} {}\n".format(i - len(backwards_fiber), int(tptr), int(vptr), name))
 
             tptr, vptr, name = this_task
@@ -4293,6 +4293,7 @@ class scylla_smp_queues(gdb.Command):
                 return '{:2} -> {:2}'.format(*q)
 
         h = histogram(formatter=formatter, print_indicators=not args.content)
+        empty_queues = 0
 
         def add_to_histogram(a, b, key=None, count=1):
             if not sg_id is None and int(key.dereference()['_sg']['_id']) != sg_id:
@@ -4330,9 +4331,15 @@ class scylla_smp_queues(gdb.Command):
                 for i in range(pending_start, pending_end):
                     add_to_histogram(a, b, key=buf[i % self._queue_size])
             else:
-                add_to_histogram(a, b, count=(len(tx_queue) + pending_end - pending_start))
+                count = len(tx_queue) + pending_end - pending_start
+                if count != 0:
+                    add_to_histogram(a, b, count=count)
+                else:
+                    empty_queues += 1
 
         gdb.write('{}\n'.format(h))
+        if empty_queues > 0:
+            gdb.write('omitted {} empty queues\n'.format(empty_queues))
 
 
 class scylla_small_objects(gdb.Command):

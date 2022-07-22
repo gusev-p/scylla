@@ -256,7 +256,7 @@ bool partition_key_matches(const schema& base, const view_info& view, const dht:
 }
 
 bool clustering_prefix_matches(const schema& base, const view_info& view, const partition_key& key, const clustering_key_prefix& ck) {
-    const auto r = view.select_statement().get_restrictions()->get_clustering_columns_restrictions();
+    const cql3::expr::expression& r = view.select_statement().get_restrictions()->get_clustering_columns_restrictions();
     std::vector<bytes> exploded_pk = key.explode();
     std::vector<bytes> exploded_ck = ck.explode();
     std::vector<const column_definition*> ck_columns;
@@ -269,7 +269,7 @@ bool clustering_prefix_matches(const schema& base, const view_info& view, const 
     auto dummy_options = cql3::query_options({ });
     // FIXME: pass nullptrs for some of theses dummies
     return cql3::expr::is_satisfied_by(
-            r->expression,
+            r,
             cql3::expr::evaluation_inputs{
                 .partition_key = &exploded_pk,
                 .clustering_key = &exploded_ck,
@@ -346,7 +346,7 @@ public:
                 // FIXME: pass dummy_options as nullptr
                 auto dummy_options = cql3::query_options({});
                 return cql3::expr::is_satisfied_by(
-                        r->expression,
+                        r,
                         cql3::expr::evaluation_inputs{
                             .partition_key = &_pk,
                             .clustering_key = &ck,
@@ -1078,7 +1078,7 @@ future<stop_iteration> view_update_builder::on_results() {
     return stop();
 }
 
-future<view_update_builder> make_view_update_builder(
+view_update_builder make_view_update_builder(
         const schema_ptr& base,
         std::vector<view_and_base>&& views_to_update,
         flat_mutation_reader_v2&& updates,
@@ -1092,7 +1092,7 @@ future<view_update_builder> make_view_update_builder(
         }
         return view_updates(std::move(v));
     }));
-    return make_ready_future<view_update_builder>(view_update_builder(base, std::move(vs), std::move(updates), std::move(existings), now));
+    return view_update_builder(base, std::move(vs), std::move(updates), std::move(existings), now);
 }
 
 future<query::clustering_row_ranges> calculate_affected_clustering_ranges(const schema& base,
