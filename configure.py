@@ -399,6 +399,7 @@ scylla_tests = set([
     'test/boost/crc_test',
     'test/boost/data_listeners_test',
     'test/boost/database_test',
+    'test/boost/dirty_memory_manager_test',
     'test/boost/double_decker_test',
     'test/boost/duration_test',
     'test/boost/dynamic_bitset_test',
@@ -427,6 +428,7 @@ scylla_tests = set([
     'test/boost/loading_cache_test',
     'test/boost/log_heap_test',
     'test/boost/estimated_histogram_test',
+    'test/boost/summary_test',
     'test/boost/logalloc_test',
     'test/boost/managed_vector_test',
     'test/boost/managed_bytes_test',
@@ -674,6 +676,7 @@ scylla_core = (['replica/database.cc',
                 'replica/distributed_loader.cc',
                 'replica/memtable.cc',
                 'replica/exceptions.cc',
+                'dirty_memory_manager.cc',
                 'absl-flat_hash_map.cc',
                 'atomic_cell.cc',
                 'caching_options.cc',
@@ -704,6 +707,7 @@ scylla_core = (['replica/database.cc',
                 'utils/generation-number.cc',
                 'utils/rjson.cc',
                 'utils/human_readable.cc',
+                'utils/histogram_metrics_helper.cc',
                 'mutation_partition.cc',
                 'mutation_partition_view.cc',
                 'mutation_partition_serializer.cc',
@@ -887,6 +891,7 @@ scylla_core = (['replica/database.cc',
                 'db/large_data_handler.cc',
                 'db/marshal/type_parser.cc',
                 'db/batchlog_manager.cc',
+                'db/tags/utils.cc',
                 'db/view/view.cc',
                 'db/view/view_update_generator.cc',
                 'db/view/row_locking.cc',
@@ -1273,6 +1278,7 @@ deps['test/boost/murmur_hash_test'] = ['bytes.cc', 'utils/murmur_hash.cc', 'test
 deps['test/boost/allocation_strategy_test'] = ['test/boost/allocation_strategy_test.cc', 'utils/logalloc.cc', 'utils/dynamic_bitset.cc']
 deps['test/boost/log_heap_test'] = ['test/boost/log_heap_test.cc']
 deps['test/boost/estimated_histogram_test'] = ['test/boost/estimated_histogram_test.cc']
+deps['test/boost/summary_test'] = ['test/boost/summary_test.cc']
 deps['test/boost/anchorless_list_test'] = ['test/boost/anchorless_list_test.cc']
 deps['test/perf/perf_fast_forward'] += ['seastar/tests/perf/linux_perf_event.cc']
 deps['test/perf/perf_simple_query'] += ['test/perf/perf.cc', 'seastar/tests/perf/linux_perf_event.cc', 'test/lib/alternator_test_env.cc'] + alternator
@@ -1535,7 +1541,7 @@ if status != 0:
     sys.exit(1)
 
 file = open(f'{outdir}/SCYLLA-VERSION-FILE', 'r')
-scylla_version = file.read().strip()
+scylla_version = file.read().strip().replace('-', '~')
 file = open(f'{outdir}/SCYLLA-RELEASE-FILE', 'r')
 scylla_release = file.read().strip()
 file = open(f'{outdir}/SCYLLA-PRODUCT-FILE', 'r')
@@ -2153,7 +2159,7 @@ with open(buildfile, 'w') as f:
         build dist-server: phony dist-server-tar dist-server-compat dist-server-compat-arch dist-server-rpm dist-server-deb
 
         rule build-submodule-reloc
-          command = cd $reloc_dir && ./reloc/build_reloc.sh --version $$(<../../build/SCYLLA-PRODUCT-FILE)-$$(<../../build/SCYLLA-VERSION-FILE)-$$(<../../build/SCYLLA-RELEASE-FILE) --nodeps $args
+          command = cd $reloc_dir && ./reloc/build_reloc.sh --version $$(<../../build/SCYLLA-PRODUCT-FILE)-$$(sed 's/-/~/' <../../build/SCYLLA-VERSION-FILE)-$$(<../../build/SCYLLA-RELEASE-FILE) --nodeps $args
         rule build-submodule-rpm
           command = cd $dir && ./reloc/build_rpm.sh --reloc-pkg $artifact
         rule build-submodule-deb
