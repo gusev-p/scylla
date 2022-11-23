@@ -42,6 +42,10 @@
 #include "locator/snitch_base.hh"
 #include "cdc/generation_id.hh"
 #include "raft/raft.hh"
+#include "raft/server.hh"
+#include "canonical_mutation.hh"
+#include "service/topology_change_sm.hh"
+#include "service/raft_bootstrap.hh"
 
 class node_ops_cmd_request;
 class node_ops_cmd_response;
@@ -87,6 +91,7 @@ class storage_service;
 class storage_proxy;
 class migration_manager;
 class raft_group0;
+class topology_change;
 
 enum class disk_error { regular, commit };
 
@@ -184,7 +189,7 @@ public:
 
     // Needed by distributed<>
     future<> stop();
-    void init_messaging_service();
+    void init_messaging_service(sharded<db::system_distributed_keyspace>& sys_dist_ks);
     future<> uninit_messaging_service();
 
 private:
@@ -319,7 +324,7 @@ public:
      * API.
      * \see init_server_without_the_messaging_service_part
      */
-    future<> init_messaging_service_part();
+    future<> init_messaging_service_part(sharded<db::system_distributed_keyspace>& sys_dist_ks);
     /*!
      * \brief Uninit the messaging service part of the service.
      */
@@ -767,6 +772,38 @@ private:
 public:
     future<bool> is_cleanup_allowed(sstring keyspace);
     bool is_repair_based_node_ops_enabled(streaming::stream_reason reason);
+
+private:
+    future<> _raft_state_monitor = make_ready_future<>();
+    // This fibers monitors raft state and start/stops the topology change
+    // coordinator fiber
+    future<> raft_state_monitor_fiber(raft::server&, sharded<db::system_distributed_keyspace>& sys_dist_ks);
+
+     // State machine that is responsible for topology change
+    topology_change_sm  _topology_change_sm;
+
+    future<> _topology_change_coordinator = make_ready_future<>();
+    future<> topology_change_coordinator_fiber(raft::server&, sharded<db::system_distributed_keyspace>&, abort_source&);
+
+    std::optional<shared_future<>> _bootstrap_result;
+    std::optional<shared_future<>> _unbootstrap_result;
+    std::unordered_map<raft::server_id, std::optional<shared_future<>>> _remove_result;
+
+    // protects topology_change_state_load() from re-entry
+    semaphore _raft_state_load_semaphore{1};
+
+    future<raft_bootstrap_cmd_result> raft_bootstrap_cmd_handler(sharded<db::system_distributed_keyspace>& sys_dist_ks, const raft_bootstrap_cmd& cmd);
+
+    future<> raft_bootstrap(raft::server&);
+    future<> raft_decomission();
+    future<> raft_removenode(locator::host_id host_id);
+    future<> raft_replace(raft::server&, raft::server_id, gms::inet_address);
+
+public:
+    // This is called on all nodes for each new command received through raft
+    future<> topology_change_transition(storage_proxy& proxy, gms::inet_address, std::vector<canonical_mutation>);
+    // load topology state machine snapshot
+    future<> topology_change_state_load();
 };
 
 }

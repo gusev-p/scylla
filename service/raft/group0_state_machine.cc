@@ -24,6 +24,7 @@
 #include "idl/frozen_schema.dist.impl.hh"
 #include "idl/experimental/broadcast_tables_lang.dist.hh"
 #include "idl/experimental/broadcast_tables_lang.dist.impl.hh"
+#include "service/storage_service.hh"
 #include "idl/group0_state_machine.dist.hh"
 #include "idl/group0_state_machine.dist.impl.hh"
 #include "service/migration_manager.hh"
@@ -103,6 +104,9 @@ future<> group0_state_machine::apply(std::vector<raft::command_cref> command) {
         [&] (broadcast_table_query& query) -> future<> {
             auto result = co_await service::broadcast_tables::execute_broadcast_table_query(_sp, query.query, cmd.new_state_id);
             _client.set_query_result(cmd.new_state_id, std::move(result));
+        },
+        [&] (topology_change& chng) -> future<> {
+            return _ss.topology_change_transition(_sp, cmd.creator_addr, chng.mutations);
         }
         ), cmd.change);
 
@@ -119,7 +123,7 @@ void group0_state_machine::drop_snapshot(raft::snapshot_id id) {
 }
 
 future<> group0_state_machine::load_snapshot(raft::snapshot_id id) {
-    return make_ready_future<>();
+    co_await _ss.topology_change_state_load();
 }
 
 future<> group0_state_machine::transfer_snapshot(gms::inet_address from, raft::snapshot_descriptor snp) {
