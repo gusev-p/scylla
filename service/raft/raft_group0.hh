@@ -175,6 +175,9 @@ public:
     // The returned ID is not empty.
     const raft::server_id& load_my_id();
 
+    // Remove the node from raft config, retries raft::commit_status_unknown.
+    future<> remove_from_raft_config(raft::server_id id);
+
 private:
     void init_rpc_verbs();
     future<> uninit_rpc_verbs();
@@ -246,9 +249,6 @@ private:
     // if we want to handle crashes of the group 0 server without crashing the entire Scylla process
     // (we could then try restarting the server internally).
     future<> start_server_for_group0(raft::group_id group0_id);
-
-    // Remove the node from raft config, retries raft::commit_status_unknown.
-    future<> remove_from_raft_config(raft::server_id id);
 
     // Load the initial Raft <-> IP address map as seen by
     // the gossiper.
