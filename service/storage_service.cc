@@ -1640,7 +1640,8 @@ future<> storage_service::remove_endpoint(inet_address endpoint) {
 }
 
 future<storage_service::replacement_info>
-storage_service::prepare_replacement_info(std::unordered_set<gms::inet_address> initial_contact_nodes, const std::unordered_map<gms::inet_address, sstring>& loaded_peer_features) {
+storage_service::prepare_replacement_info(std::unordered_set<gms::inet_address> initial_contact_nodes, const std::unordered_map<gms::inet_address, sstring>& loaded_peer_features,
+                                          bool get_tokens) {
     if (!get_replace_address()) {
         throw std::runtime_error(format("replace_address is empty"));
     }
@@ -1672,9 +1673,12 @@ storage_service::prepare_replacement_info(std::unordered_set<gms::inet_address> 
         throw std::runtime_error(format("Cannot replace_address {} because it has left the ring, status={}", replace_address, status));
     }
 
-    auto tokens = get_tokens_for(replace_address);
-    if (tokens.empty()) {
-        throw std::runtime_error(format("Could not find tokens for {} to replace", replace_address));
+    std::unordered_set<dht::token> tokens;
+    if (get_tokens) {
+        tokens = get_tokens_for(replace_address);
+        if (tokens.empty()) {
+            throw std::runtime_error(format("Could not find tokens for {} to replace", replace_address));
+        }
     }
 
     auto dc_rack = get_dc_rack_for(replace_address);
