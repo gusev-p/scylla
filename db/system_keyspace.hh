@@ -27,6 +27,7 @@
 #include "locator/host_id.hh"
 #include "service/raft/group0_fwd.hh"
 #include "tasks/task_manager.hh"
+#include "service/topology_change_sm.hh"
 
 namespace service {
 
@@ -140,6 +141,7 @@ public:
     static constexpr auto GROUP0_HISTORY = "group0_history";
     static constexpr auto DISCOVERY = "discovery";
     static constexpr auto BROADCAST_KV_STORE = "broadcast_kv_store";
+    static constexpr auto TOPOLOGY_CHANGES = "topology_changes";
 
     struct v3 {
         static constexpr auto BATCHES = "batches";
@@ -224,6 +226,7 @@ public:
     static schema_ptr group0_history();
     static schema_ptr discovery();
     static schema_ptr broadcast_kv_store();
+    static schema_ptr topology_changes();
 
     static table_schema_version generate_schema_version(table_id table_id, uint16_t offset = 0);
 
@@ -440,6 +443,11 @@ public:
     // Checks whether the group 0 history table contains the given state ID.
     // Assumes that the history table exists, i.e. Raft experimental feature is enabled.
     static future<bool> group0_history_contains(utils::UUID state_id);
+
+    static future<service::topology_change_sm::topology_type> load_topology_state();
+    mutation make_topology_change_state_mutation(int64_t ts, raft::server_id raft_id, service::node_state state, sstring datacenter,
+         sstring rack, sstring release_version, const std::optional<rjson::value>&,
+         const std::unordered_set<dht::token>& tokens, std::optional<service::tokens_state> tokens_state);
 
     // The mutation appends the given state ID to the group 0 history table, with the given description if non-empty.
     //
