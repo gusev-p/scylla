@@ -21,6 +21,7 @@
 #include <boost/range/iterator_range.hpp>
 #include <boost/icl/interval.hpp>
 #include "range.hh"
+#include <seastar/core/shared_future.hh>
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/semaphore.hh>
 
@@ -275,6 +276,9 @@ public:
     long get_ring_version() const;
     void invalidate_cached_rings();
 
+    int64_t get_topology_version() const;
+    void set_topology_version(int64_t version);
+
     friend class token_metadata_impl;
 };
 
@@ -291,6 +295,7 @@ mutable_token_metadata_ptr make_token_metadata_ptr(Args... args) {
 class shared_token_metadata {
     mutable_token_metadata_ptr _shared;
     token_metadata_lock_func _lock_func;
+    mutable std::optional<shared_promise<>> _change_promise;
 
 public:
     // used to construct the shared object as a sharded<> instance
@@ -308,6 +313,8 @@ public:
     }
 
     void set(mutable_token_metadata_ptr tmptr) noexcept;
+
+    future<> wait_for_next_version(lowres_clock::time_point timeout) const;
 
     // Token metadata changes are serialized
     // using the schema_tables merge_lock.

@@ -49,4 +49,14 @@ inline std::ostream& operator<<(std::ostream& os, const raft_bootstrap_cmd::comm
     return os;
 }
 
+struct fencing_token {
+    int64_t topology_version;
+};
+
+inline std::ostream& operator<<(std::ostream& os, const fencing_token& fencing_token) {
+    return os << "fencing_token(" << fencing_token.topology_version << ")";
+}
+
+// todo rename to raft_topology.hh?
+
 }

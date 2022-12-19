@@ -69,6 +69,8 @@ private:
     long _ring_version = 0;
     static thread_local long _static_ring_version;
 
+    int64_t _topology_version = 0;
+
     // Note: if any member is added to this class
     // clone_async() must be updated to copy that member.
 
@@ -304,6 +306,14 @@ public:
         _ring_version = ++_static_ring_version;
     }
 
+    int64_t get_topology_version() const {
+        return _topology_version;
+    }
+
+    void set_topology_version(int64_t version) {
+        _topology_version = version;
+    }
+
     friend class token_metadata;
 };
 
@@ -354,6 +364,7 @@ future<token_metadata_impl> token_metadata_impl::clone_async() const noexcept {
         co_await coroutine::maybe_yield();
     }
     ret._ring_version = _ring_version;
+    ret._topology_version = _topology_version;
     co_return ret;
 }
 
@@ -384,6 +395,7 @@ future<> token_metadata_impl::clear_gently() noexcept {
     co_await utils::clear_gently(_pending_ranges_interval_map);
     co_await utils::clear_gently(_sorted_tokens);
     co_await _topology.clear_gently();
+    _topology_version = 0;
     co_return;
 }
 
@@ -1237,11 +1249,31 @@ token_metadata::invalidate_cached_rings() {
     _impl->invalidate_cached_rings();
 }
 
+int64_t
+token_metadata::get_topology_version() const {
+    return _impl->get_topology_version();
+}
+
+void
+token_metadata::set_topology_version(int64_t version) {
+    _impl->set_topology_version(version);
+}
+
+future<> shared_token_metadata::wait_for_next_version(lowres_clock::time_point timeout) const {
+    if (!_change_promise) {
+        _change_promise.emplace();
+    }
+    return _change_promise->get_shared_future(timeout);
+}
+
 void shared_token_metadata::set(mutable_token_metadata_ptr tmptr) noexcept {
     if (_shared->get_ring_version() >= tmptr->get_ring_version()) {
         on_internal_error(tlogger, format("shared_token_metadata: must not set non-increasing version: {} -> {}", _shared->get_ring_version(), tmptr->get_ring_version()));
     }
     _shared = std::move(tmptr);
+    if (_change_promise) {
+        std::exchange(_change_promise, std::nullopt)->set_value();
+    }
 }
 
 future<> shared_token_metadata::mutate_token_metadata(seastar::noncopyable_function<future<> (token_metadata&)> func) {

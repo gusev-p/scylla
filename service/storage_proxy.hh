@@ -30,6 +30,7 @@
 #include "db/hints/host_filter.hh"
 #include "utils/small_vector.hh"
 #include "service/endpoint_lifecycle_subscriber.hh"
+#include "service/raft_bootstrap.hh"
 #include <seastar/core/circular_buffer.hh>
 #include "exceptions/exceptions.hh"
 #include "exceptions/coordinator_result.hh"
@@ -216,6 +217,20 @@ public:
     }
 
     locator::token_metadata_ptr get_token_metadata_ptr() const noexcept;
+
+    struct request_info {
+        schema_ptr schema;
+        dht::token token;
+    };
+
+    future<std::optional<replica::stale_topology_exception>> try_apply_fence(fencing_token fencing_token,
+        lowres_clock::time_point timeout,
+        noncopyable_function<future<request_info>()>&& get_request_info);
+
+    future<std::optional<replica::stale_topology_exception>> try_apply_fence(fencing_token fencing_token,
+        lowres_clock::time_point timeout,
+        const dht::partition_range& range,
+        schema_ptr schema);
 
     query::max_result_size get_max_result_size(const query::partition_slice& slice) const;
     query::tombstone_limit get_tombstone_limit() const;
