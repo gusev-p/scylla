@@ -149,7 +149,7 @@ SEASTAR_TEST_CASE(test_reader_with_different_strategies) {
         random_mutation_generator gen{random_mutation_generator::generate_counters::no, local_shard_only::no};
         co_await e.db().invoke_on_all([gs = global_schema_ptr(gen.schema())](replica::database& db) -> future<> {
             co_await db.add_column_family_and_make_directory(gs.get());
-            db.find_column_family(gs.get()).mark_ready_for_writes();
+            db.mark_table_ready_for_writes(gs.get());
         });
         auto& cf = e.local_db().find_column_family(gen.schema());
         const auto& local_sharder = cf.schema()->get_sharder();

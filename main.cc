@@ -1100,7 +1100,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // done only by shard 0, so we'll no longer face race conditions as
             // described here: https://github.com/scylladb/scylla/issues/1014
             supervisor::notify("loading system sstables");
-            replica::distributed_loader::init_system_keyspace(sys_ks, erm_factory, db, *cfg, system_table_load_phase::phase1).get();
+            replica::distributed_loader::init_system_keyspace(sys_ks, erm_factory, db, *cfg).get();
 
             auto listen_address = utils::resolve(cfg->listen_address, family).get0();
 
@@ -1341,11 +1341,9 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
 
             db.local().maybe_init_schema_commitlog();
 
-            // Init schema tables only after enable_features_on_startup()
-            // because table construction consults enabled features.
-            // Needs to be before system_keyspace::setup(), which writes to schema tables.
-            supervisor::notify("loading system_schema sstables");
-            replica::distributed_loader::init_system_keyspace(sys_ks, erm_factory, db, *cfg, system_table_load_phase::phase2).get();
+            // mark system tables writable, now they can choose the proper commitlog
+            supervisor::notify("mark system tables writable");
+            sys_ks.invoke_on_all(&db::system_keyspace::mark_writable).get();
 
             if (raft_gr.local().is_enabled()) {
                 if (!db.local().uses_schema_commitlog()) {

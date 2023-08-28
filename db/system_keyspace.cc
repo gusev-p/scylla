@@ -86,17 +86,18 @@ namespace {
         }
     });
     const auto set_use_schema_commitlog = schema_builder::register_static_configurator([](const sstring& ks_name, const sstring& cf_name, schema_static_props& props) {
-        static const std::unordered_set<sstring> raft_tables = {
+        static const std::unordered_set<sstring> schema_commitlog_tables = {
             system_keyspace::RAFT,
             system_keyspace::RAFT_SNAPSHOTS,
             system_keyspace::RAFT_SNAPSHOT_CONFIG,
             system_keyspace::GROUP0_HISTORY,
             system_keyspace::DISCOVERY,
             system_keyspace::TABLETS,
+            system_keyspace::LOCAL,
+            system_keyspace::SCYLLA_LOCAL
         };
-        if (ks_name == system_keyspace::NAME && raft_tables.contains(cf_name)) {
+        if (ks_name == system_keyspace::NAME && schema_commitlog_tables.contains(cf_name)) {
             props.use_schema_commitlog = true;
-            props.load_phase = system_table_load_phase::phase2;
         }
     });
 }
@@ -1928,13 +1929,15 @@ static bool maybe_write_in_user_memory(schema_ptr s) {
 
 future<> system_keyspace::make(
         locator::effective_replication_map_factory& erm_factory,
-        replica::database& db, db::config& cfg, system_table_load_phase phase) {
+        replica::database& db, db::config& cfg) {
     for (auto&& table : system_keyspace::all_tables(db.get_config())) {
-        if (table->static_props().load_phase != phase) {
-            continue;
-        }
-
         co_await db.create_local_system_table(table, maybe_write_in_user_memory(table), erm_factory);
+    }
+}
+
+void system_keyspace::mark_writable() {
+    for (auto&& table : system_keyspace::all_tables(_db.get_config())) {
+        _db.mark_table_ready_for_writes(table);
     }
 }
 

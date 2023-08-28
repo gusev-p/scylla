@@ -1000,6 +1000,13 @@ future<> database::create_local_system_table(
     co_await add_column_family(ks, table, std::move(cfg));
 }
 
+void database::mark_table_ready_for_writes(const schema_ptr& schema) {
+    auto* cl = schema->static_props().use_schema_commitlog && _uses_schema_commitlog
+           ? _schema_commitlog.get()
+           : _commitlog.get();
+    find_column_family(schema).mark_ready_for_writes(cl);
+}
+
 future<> database::add_column_family(keyspace& ks, schema_ptr schema, column_family::config cfg) {
     schema = local_schema_registry().learn(schema);
     schema->registry_entry()->mark_synced();
@@ -1012,15 +1019,7 @@ future<> database::add_column_family(keyspace& ks, schema_ptr schema, column_fam
     }
     // avoid self-reporting
     auto& sst_manager = is_system_table(*schema) ? get_system_sstables_manager() : get_user_sstables_manager();
-    lw_shared_ptr<column_family> cf;
-    if (cfg.enable_commitlog && _commitlog) {
-        db::commitlog& cl = schema->static_props().use_schema_commitlog && _uses_schema_commitlog
-                ? *_schema_commitlog
-                : *_commitlog;
-        cf = make_lw_shared<column_family>(schema, std::move(cfg), ks.metadata()->get_storage_options_ptr(), cl, _compaction_manager, sst_manager, *_cl_stats, _row_cache_tracker, erm);
-    } else {
-       cf = make_lw_shared<column_family>(schema, std::move(cfg), ks.metadata()->get_storage_options_ptr(), column_family::no_commitlog(), _compaction_manager, sst_manager, *_cl_stats, _row_cache_tracker, erm);
-    }
+    auto cf = make_lw_shared<column_family>(schema, std::move(cfg), ks.metadata()->get_storage_options_ptr(), _compaction_manager, sst_manager, *_cl_stats, _row_cache_tracker, erm);
     cf->set_durable_writes(ks.metadata()->durable_writes());
 
     auto uuid = schema->id();

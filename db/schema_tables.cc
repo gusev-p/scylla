@@ -96,7 +96,6 @@ namespace {
     const auto set_use_schema_commitlog = schema_builder::register_static_configurator([](const sstring& ks_name, const sstring& cf_name, schema_static_props& props) {
         if (ks_name == schema_tables::NAME) {
             props.use_schema_commitlog = true;
-            props.load_phase = system_table_load_phase::phase2;
         }
     });
 }
@@ -1537,7 +1536,7 @@ static future<> merge_tables_and_views(distributed<service::storage_proxy>& prox
             co_await db.add_column_family_and_make_directory(gs);
         });
         for (auto&& gs : boost::range::join(tables_diff.created, views_diff.created)) {
-            db.find_column_family(gs).mark_ready_for_writes();
+            db.mark_table_ready_for_writes(gs);
             co_await coroutine::maybe_yield();
         }
         std::vector<bool> columns_changed;
