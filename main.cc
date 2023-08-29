@@ -1384,7 +1384,9 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // replay position in the truncation record.
             // Needs to happen before system_keyspace::setup(), which reads truncation records.
             db.local().get_tables_metadata().for_each_table([] (table_id, lw_shared_ptr<replica::table> table_ptr) {
-                if (table_ptr->schema()->ks_name() == db::schema_tables::NAME) {
+                // We are effectively prohibiting truncates for tables that use schema commitlog.
+                // Not sure if this is what we want.
+                if (table_ptr->schema()->static_props().use_schema_commitlog) {
                     if (table_ptr->get_truncation_record() != db_clock::time_point::min()) {
                         // replay_position stored in the truncation record may belong to
                         // the old (default) commitlog domain. It's not safe to interpret
