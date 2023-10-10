@@ -1064,7 +1064,8 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             cql_config.start(std::ref(*cfg)).get();
             startlog.info("ARM_DBG after cql_config.start");
 
-            supervisor::notify("starting query processor");
+            supervisor::notify("starting query processor (not really, exiting)");
+            _exit(0);
             cql3::query_processor::memory_config qp_mcfg = {memory::stats().total_memory() / 256, memory::stats().total_memory() / 2560};
             debug::the_query_processor = &qp;
             auto local_data_dict = seastar::sharded_parameter([] (const replica::database& db) { return db.as_data_dictionary(); }, std::ref(db));
