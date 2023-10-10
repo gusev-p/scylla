@@ -1048,15 +1048,21 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                 reinterpret_cast<service::storage_proxy_stats::stats*>(ptr)->register_stats();
                 reinterpret_cast<service::storage_proxy_stats::stats*>(ptr)->register_split_metrics_local();
             };
+            startlog.info("ARM_DBG before proxy.start");
+            scheduling_group_key sched_key = scheduling_group_key_create(storage_proxy_stats_cfg).get0();
+            startlog.info("ARM_DBG after sched_key created");
             proxy.start(std::ref(db), spcfg, std::ref(node_backlog),
-                    scheduling_group_key_create(storage_proxy_stats_cfg).get0(),
+                    sched_key,
                     std::ref(feature_service), std::ref(token_metadata), std::ref(erm_factory)).get();
+            startlog.info("ARM_DBG after proxy.start");
 
             // #293 - do not stop anything
             // engine().at_exit([&proxy] { return proxy.stop(); });
 
             static sharded<cql3::cql_config> cql_config;
+            startlog.info("ARM_DBG before cql_config.start");
             cql_config.start(std::ref(*cfg)).get();
+            startlog.info("ARM_DBG after cql_config.start");
 
             supervisor::notify("starting query processor");
             cql3::query_processor::memory_config qp_mcfg = {memory::stats().total_memory() / 256, memory::stats().total_memory() / 2560};

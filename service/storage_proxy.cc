@@ -2838,6 +2838,7 @@ storage_proxy::storage_proxy(distributed<replica::database>& db, storage_proxy::
     , _mutate_stage{"storage_proxy_mutate", &storage_proxy::do_mutate}
     , _max_view_update_backlog(max_view_update_backlog)
     , _cancellable_write_handlers_list(std::make_unique<cancellable_write_handlers_list>()) {
+    slogger.info("ARM_DBG storage_proxy::storage_proxy ENTER");
     namespace sm = seastar::metrics;
     _metrics.add_group(storage_proxy_stats::COORDINATOR_STATS_CATEGORY, {
         sm::make_queue_length("current_throttled_writes", [this] { return _throttled_writes.size(); },
@@ -2847,6 +2848,7 @@ storage_proxy::storage_proxy(distributed<replica::database>& db, storage_proxy::
     slogger.trace("hinted DCs: {}", cfg.hinted_handoff_enabled.to_configuration_string());
     _hints_manager.register_metrics("hints_manager");
     _hints_for_views_manager.register_metrics("hints_for_views_manager");
+    slogger.info("ARM_DBG storage_proxy::storage_proxy LEAVE");
 }
 
 struct storage_proxy::remote& storage_proxy::remote() {
