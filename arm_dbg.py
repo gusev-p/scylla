@@ -1,8 +1,9 @@
 import subprocess
+import os
 import yaml
 
-stderr_file = open("/home/gusev-p/arm_dbg/stderr", "wb")
-stdout_file = open("/home/gusev-p/arm_dbg/stdout", "wb")
+stderr_file = open("/home/gusev-p/arm_dbg/stderr", "w")
+stdout_file = open("/home/gusev-p/arm_dbg/stdout", "w")
 
 config_file_path = '/home/gusev-p/arm_dbg/scylla.yaml'
 scylla_host_addr = '127.251.251.42'
@@ -71,9 +72,8 @@ with open(config_file_path, 'w') as config_file:
 
 args = [
     '/home/gusev-p/scylladb/build/debug/scylla',
-    '--smp', '50',
+    '--smp', '2',
     '--options-file', config_file_path,
-    '-m', '50G',
     '--collectd', '0',
     '--overprovisioned',
     '--max-networking-io-control-blocks', '1000',
@@ -86,7 +86,22 @@ args = [
     '--abort-on-ebadf', '1'
 ]
 
-completed_scylla = subprocess.run(args, stdout=stdout_file, stderr=stderr_file)
-stderr_file.flush()
-stdout_file.flush()
-print(f'scylla finished, returncode {completed_scylla.returncode}')
+my_env = os.environ.copy()
+my_env["ASAN_OPTIONS"] = "abort_on_error=1:disable_coredump=0:unmap_shadow_on_exit=1"
+
+iteration = 0
+while True:
+    iteration += 1
+    message = f'================== iteration {iteration} ==================\n'
+    print(message, flush=True)
+    stderr_file.write(message)
+    stderr_file.flush()
+    stdout_file.write(message)
+    stdout_file.flush()
+    completed_scylla = subprocess.run(args, stdout=stdout_file, stderr=stderr_file, env=my_env)
+    stderr_file.flush()
+    stdout_file.flush()
+    print(f'scylla finished, returncode {completed_scylla.returncode}', flush=True)
+    if completed_scylla.returncode != 0:
+        print(f'scylla CRASH')
+        break

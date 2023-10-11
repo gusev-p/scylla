@@ -727,7 +727,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                 sighup_handler.stop().get();
             });
 
-            logalloc::prime_segment_pool(memory::stats().total_memory(), memory::min_free_memory()).get();
+            // logalloc::prime_segment_pool(memory::stats().total_memory(), memory::min_free_memory()).get();
             logging::apply_settings(cfg->logging_settings(app.options().log_opts));
 
             startlog.info(startup_msg, scylla_version(), get_build_id());
@@ -1042,27 +1042,26 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             storage_proxy_stats_cfg.constructor = [plain_constructor = storage_proxy_stats_cfg.constructor] (void* ptr) {
                 plain_constructor(ptr);
                 reinterpret_cast<service::storage_proxy_stats::stats*>(ptr)->register_stats();
+                startlog.info("ARM_DBG huj12");
                 reinterpret_cast<service::storage_proxy_stats::stats*>(ptr)->register_split_metrics_local();
+                startlog.info("ARM_DBG huj13");
             };
             storage_proxy_stats_cfg.rename = [] (void* ptr) {
                 reinterpret_cast<service::storage_proxy_stats::stats*>(ptr)->register_stats();
                 reinterpret_cast<service::storage_proxy_stats::stats*>(ptr)->register_split_metrics_local();
             };
-            startlog.info("ARM_DBG before proxy.start");
+            startlog.info("ARM_DBG before scheduling_group_key_create");
             scheduling_group_key sched_key = scheduling_group_key_create(storage_proxy_stats_cfg).get0();
-            startlog.info("ARM_DBG after sched_key created");
+            startlog.info("ARM_DBG after scheduling_group_key_create");
             proxy.start(std::ref(db), spcfg, std::ref(node_backlog),
                     sched_key,
                     std::ref(feature_service), std::ref(token_metadata), std::ref(erm_factory)).get();
-            startlog.info("ARM_DBG after proxy.start");
 
             // #293 - do not stop anything
             // engine().at_exit([&proxy] { return proxy.stop(); });
 
             static sharded<cql3::cql_config> cql_config;
-            startlog.info("ARM_DBG before cql_config.start");
             cql_config.start(std::ref(*cfg)).get();
-            startlog.info("ARM_DBG after cql_config.start");
 
             supervisor::notify("starting query processor (not really, exiting)");
             _exit(0);

@@ -2538,16 +2538,25 @@ storage_proxy_stats::stats::stats()
         , mutation_data_read_errors(COORDINATOR_STATS_CATEGORY, "read_errors", "number of mutation data read requests that failed", "mutation_data") { }
 
 void storage_proxy_stats::stats::register_split_metrics_local() {
+    slogger.info("HUJ_1");
     write_stats::register_split_metrics_local();
-
+    slogger.info("HUJ_2");
     data_read_attempts.register_metrics_local();
+    slogger.info("HUJ_3");
     data_read_completed.register_metrics_local();
+    slogger.info("HUJ_4");
     data_read_errors.register_metrics_local();
+    slogger.info("HUJ_5");
     digest_read_attempts.register_metrics_local();
+    slogger.info("HUJ_6");
     digest_read_completed.register_metrics_local();
+    slogger.info("HUJ_7");
     mutation_data_read_attempts.register_metrics_local();
+    slogger.info("HUJ_8");
     mutation_data_read_completed.register_metrics_local();
+    slogger.info("HUJ_9");
     mutation_data_read_errors.register_metrics_local();
+    slogger.info("HUJ_10");
 }
 
 void storage_proxy_stats::stats::register_stats() {
@@ -2838,7 +2847,6 @@ storage_proxy::storage_proxy(distributed<replica::database>& db, storage_proxy::
     , _mutate_stage{"storage_proxy_mutate", &storage_proxy::do_mutate}
     , _max_view_update_backlog(max_view_update_backlog)
     , _cancellable_write_handlers_list(std::make_unique<cancellable_write_handlers_list>()) {
-    slogger.info("ARM_DBG storage_proxy::storage_proxy ENTER");
     namespace sm = seastar::metrics;
     _metrics.add_group(storage_proxy_stats::COORDINATOR_STATS_CATEGORY, {
         sm::make_queue_length("current_throttled_writes", [this] { return _throttled_writes.size(); },
@@ -2848,7 +2856,6 @@ storage_proxy::storage_proxy(distributed<replica::database>& db, storage_proxy::
     slogger.trace("hinted DCs: {}", cfg.hinted_handoff_enabled.to_configuration_string());
     _hints_manager.register_metrics("hints_manager");
     _hints_for_views_manager.register_metrics("hints_for_views_manager");
-    slogger.info("ARM_DBG storage_proxy::storage_proxy LEAVE");
 }
 
 struct storage_proxy::remote& storage_proxy::remote() {
