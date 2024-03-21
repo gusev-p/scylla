@@ -21,6 +21,7 @@ def raft_op_timeout(mode):
 
 @pytest.mark.asyncio
 @skip_mode('release', 'error injections are not supported in release mode')
+@skip_mode('debug', 'aarch64/debug is unpredictably slow', platform_key='aarch64')
 async def test_cannot_add_new_node(manager: ManagerClient, raft_op_timeout: int) -> None:
     # This test makes sure that trying to add a new node fails with timeout
     # if the majority of the cluster is not available.
@@ -72,6 +73,7 @@ async def test_cannot_add_new_node(manager: ManagerClient, raft_op_timeout: int)
 
 @pytest.mark.asyncio
 @skip_mode('release', 'error injections are not supported in release mode')
+@skip_mode('debug', 'aarch64/debug is unpredictably slow', platform_key='aarch64')
 async def test_quorum_lost_during_node_join(manager: ManagerClient, raft_op_timeout: int) -> None:
     config = {
         'error_injections_at_startup': [
@@ -117,6 +119,7 @@ async def test_quorum_lost_during_node_join(manager: ManagerClient, raft_op_time
 
 @pytest.mark.asyncio
 @skip_mode('release', 'error injections are not supported in release mode')
+@skip_mode('debug', 'aarch64/debug is unpredictably slow', platform_key='aarch64')
 async def test_quorum_lost_during_node_join_response_handler(manager: ManagerClient, raft_op_timeout: int) -> None:
     logger.info("starting a first node (the leader)")
     servers = [await manager.server_add()]
@@ -166,6 +169,7 @@ async def test_quorum_lost_during_node_join_response_handler(manager: ManagerCli
 
 @pytest.mark.asyncio
 @skip_mode('release', 'error injections are not supported in release mode')
+@skip_mode('debug', 'aarch64/debug is unpredictably slow', platform_key='aarch64')
 async def test_cannot_run_operations(manager: ManagerClient, raft_op_timeout: int) -> None:
     logger.info("starting a first node (the leader)")
     servers = [await manager.server_add(config={
