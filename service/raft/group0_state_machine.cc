@@ -161,8 +161,10 @@ future<> group0_state_machine::merge_and_apply(group0_state_machine_merger& merg
         _client.set_query_result(cmd.new_state_id, std::move(result));
     },
     [&] (topology_change& chng) -> future<> {
+        slogger.info("DBG group0_state_machine::merge_and_apply ENTER");
         co_await write_mutations_to_database(_sp, cmd.creator_addr, std::move(chng.mutations));
         co_await _ss.topology_transition();
+        slogger.info("DBG group0_state_machine::merge_and_apply LEAVE");
     },
     [&] (write_mutations& muts) -> future<> {
         return write_mutations_to_database(_sp, cmd.creator_addr, std::move(muts.mutations));
@@ -186,9 +188,9 @@ future<> group0_state_machine::apply(std::vector<raft::command_cref> command) {
         auto is = ser::as_input_stream(c);
         auto cmd = ser::deserialize(is, boost::type<group0_command>{});
 
-        slogger.trace("cmd: prev_state_id: {}, new_state_id: {}, creator_addr: {}, creator_id: {}",
+        slogger.info("DBG cmd: prev_state_id: {}, new_state_id: {}, creator_addr: {}, creator_id: {}",
                 cmd.prev_state_id, cmd.new_state_id, cmd.creator_addr, cmd.creator_id);
-        slogger.trace("cmd.history_append: {}", cmd.history_append);
+        slogger.info("DBG cmd.history_append: {}", cmd.history_append);
 
         if (cmd.prev_state_id) {
             if (*cmd.prev_state_id != m.last_id()) {
@@ -232,8 +234,10 @@ future<> group0_state_machine::load_snapshot(raft::snapshot_id id) {
     // topology_state_load applies persisted state machine state into
     // memory and thus needs to be protected with apply mutex
     auto read_apply_mutex_holder = co_await _client.hold_read_apply_mutex();
+    slogger.info("DBG group0_state_machine::load_snapshot {} ENTER", id);
     co_await _ss.topology_state_load();
     _ss._topology_state_machine.event.broadcast();
+    slogger.info("DBG group0_state_machine::load_snapshot {} LEAVE", id);
 }
 
 future<> group0_state_machine::transfer_snapshot(raft::server_id from_id, raft::snapshot_descriptor snp) {

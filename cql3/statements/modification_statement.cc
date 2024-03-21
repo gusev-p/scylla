@@ -255,8 +255,14 @@ modification_statement::execute_without_checking_exception_message(query_process
     return modify_stage(this, seastar::ref(qp), seastar::ref(qs), seastar::cref(options));
 }
 
+static logging::logger my_logger("my_logger");
+
 future<::shared_ptr<cql_transport::messages::result_message>>
 modification_statement::do_execute(query_processor& qp, service::query_state& qs, const query_options& options) const {
+    const auto dbg = raw_cql_statement.find("update system.topology") != sstring::npos;
+    if (dbg) {
+        my_logger.info("DBG update [{}] ENTER", raw_cql_statement);
+    }
     (void)validation::validate_column_family(qp.db(), keyspace(), column_family());
 
     tracing::add_table_name(qs.get_trace_state(), keyspace(), column_family());
@@ -279,7 +285,11 @@ modification_statement::do_execute(query_processor& qp, service::query_state& qs
     } 
 
     auto res = co_await execute_without_condition(qp, qs, options, json_cache, std::move(keys));
-    
+
+    if (dbg) {
+        my_logger.info("DBG update [{}] DONE", raw_cql_statement);
+    }
+
     if (!res) {
         co_return seastar::make_shared<cql_transport::messages::result_message::exception>(std::move(res).assume_error());
     }

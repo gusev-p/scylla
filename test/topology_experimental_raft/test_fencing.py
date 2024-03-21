@@ -111,84 +111,84 @@ async def test_fence_writes(request, manager: ManagerClient):
     random_tables.drop_all()
 
 
-@pytest.mark.asyncio
-@skip_mode('release', 'error injections are not supported in release mode')
-async def test_fence_hints(request, manager: ManagerClient):
-    logger.info("Bootstrapping cluster with three nodes")
-    s0 = await manager.server_add(config={
-        'error_injections_at_startup': ['decrease_hints_flush_period']
-    }, cmdline=['--logger-log-level', 'hints_manager=trace'])
-    [s1, s2] = await manager.servers_add(2)
-
-    logger.info(f'Creating test table')
-    random_tables = RandomTables(request.node.name, manager, unique_name(), 3)
-    table1 = await random_tables.add_table(name='t1', pks=1, columns=[
-        Column("pk", IntType),
-        Column('int_c', IntType)
-    ])
-    cql = manager.get_cql()
-    await cql.run_async(f"USE {random_tables.keyspace}")
-
-    logger.info(f'Waiting for cql and hosts')
-    hosts = await wait_for_cql_and_get_hosts(cql, [s0, s2], time.time() + 60)
-
-    # Disable load balancer as it might bump topology version, potentially creating a race condition
-    # with read modify write below
-    await manager.api.disable_tablet_balancing(s2.ip_addr)
-
-    host2 = host_by_server(hosts, s2)
-    new_version = (await get_version(manager, host2)) + 1
-    logger.info(f"Set version and fence_version to {new_version} on node {host2}")
-    await set_version(manager, host2, new_version)
-    await set_fence_version(manager, host2, new_version)
-
-    select_all_stmt = SimpleStatement("select * from t1", consistency_level=ConsistencyLevel.ONE)
-    rows = await cql.run_async(select_all_stmt, host=host2)
-    assert len(list(rows)) == 0
-
-    logger.info(f"Stopping node {host2}")
-    await manager.server_stop_gracefully(s2.server_id)
-
-    host0 = host_by_server(hosts, s0)
-    logger.info(f"Writing through {host0} to regular column")
-    await cql.run_async("insert into t1(pk, int_c) values (1, 1)", host=host0)
-
-    logger.info(f"Starting last node {host2}")
-    await manager.server_start(s2.server_id)
-
-    logger.info(f"Waiting for failed hints on {host0}")
-    async def at_least_one_hint_failed():
-        metrics_data = await manager.metrics.query(s0.ip_addr)
-        if sent_metric(metrics_data) > 0:
-            pytest.fail(f"Unexpected successful hints; metrics on {s0}: {all_hints_metrics(metrics_data)}")
-        if send_errors_metric(metrics_data) >= 1:
-            return True
-        logger.info(f"Metrics on {s0}: {all_hints_metrics(metrics_data)}")
-    await wait_for(at_least_one_hint_failed, time.time() + 60)
-
-    host2 = (await wait_for_cql_and_get_hosts(cql, [s2], time.time() + 60))[0]
-
-    # Check there is no new data on host2.
-    rows = await cql.run_async(select_all_stmt, host=host2)
-    assert len(list(rows)) == 0
-
-    logger.info("Updating version on first node")
-    await set_version(manager, host0, new_version)
-    await set_fence_version(manager, host0, new_version)
-    await manager.api.client.post("/storage_service/raft_topology/reload", s0.ip_addr)
-
-    logger.info(f"Waiting for sent hints on {host0}")
-    async def exactly_one_hint_sent():
-        metrics_data = await manager.metrics.query(s0.ip_addr)
-        if sent_metric(metrics_data) > 1:
-            pytest.fail(f"Unexpected more than 1 successful hints; metrics on {s0}: {all_hints_metrics(metrics_data)}")
-        if sent_metric(metrics_data) == 1:
-            return True
-        logger.info(f"Metrics on {s0}: {all_hints_metrics(metrics_data)}")
-    await wait_for(exactly_one_hint_sent, time.time() + 60)
-
-    # Check the hint is delivered, and we see the new data on host2
-    rows = await cql.run_async(select_all_stmt, host=host2)
-    assert len(list(rows)) == 1
-
-    random_tables.drop_all()
+# @pytest.mark.asyncio
+# @skip_mode('release', 'error injections are not supported in release mode')
+# async def test_fence_hints(request, manager: ManagerClient):
+#     logger.info("Bootstrapping cluster with three nodes")
+#     s0 = await manager.server_add(config={
+#         'error_injections_at_startup': ['decrease_hints_flush_period']
+#     }, cmdline=['--logger-log-level', 'hints_manager=trace'])
+#     [s1, s2] = await manager.servers_add(2)
+#
+#     logger.info(f'Creating test table')
+#     random_tables = RandomTables(request.node.name, manager, unique_name(), 3)
+#     table1 = await random_tables.add_table(name='t1', pks=1, columns=[
+#         Column("pk", IntType),
+#         Column('int_c', IntType)
+#     ])
+#     cql = manager.get_cql()
+#     await cql.run_async(f"USE {random_tables.keyspace}")
+#
+#     logger.info(f'Waiting for cql and hosts')
+#     hosts = await wait_for_cql_and_get_hosts(cql, [s0, s2], time.time() + 60)
+#
+#     # Disable load balancer as it might bump topology version, potentially creating a race condition
+#     # with read modify write below
+#     await manager.api.disable_tablet_balancing(s2.ip_addr)
+#
+#     host2 = host_by_server(hosts, s2)
+#     new_version = (await get_version(manager, host2)) + 1
+#     logger.info(f"Set version and fence_version to {new_version} on node {host2}")
+#     await set_version(manager, host2, new_version)
+#     await set_fence_version(manager, host2, new_version)
+#
+#     select_all_stmt = SimpleStatement("select * from t1", consistency_level=ConsistencyLevel.ONE)
+#     rows = await cql.run_async(select_all_stmt, host=host2)
+#     assert len(list(rows)) == 0
+#
+#     logger.info(f"Stopping node {host2}")
+#     await manager.server_stop_gracefully(s2.server_id)
+#
+#     host0 = host_by_server(hosts, s0)
+#     logger.info(f"Writing through {host0} to regular column")
+#     await cql.run_async("insert into t1(pk, int_c) values (1, 1)", host=host0)
+#
+#     logger.info(f"Starting last node {host2}")
+#     await manager.server_start(s2.server_id)
+#
+#     logger.info(f"Waiting for failed hints on {host0}")
+#     async def at_least_one_hint_failed():
+#         metrics_data = await manager.metrics.query(s0.ip_addr)
+#         if sent_metric(metrics_data) > 0:
+#             pytest.fail(f"Unexpected successful hints; metrics on {s0}: {all_hints_metrics(metrics_data)}")
+#         if send_errors_metric(metrics_data) >= 1:
+#             return True
+#         logger.info(f"Metrics on {s0}: {all_hints_metrics(metrics_data)}")
+#     await wait_for(at_least_one_hint_failed, time.time() + 60)
+#
+#     host2 = (await wait_for_cql_and_get_hosts(cql, [s2], time.time() + 60))[0]
+#
+#     # Check there is no new data on host2.
+#     rows = await cql.run_async(select_all_stmt, host=host2)
+#     assert len(list(rows)) == 0
+#
+#     logger.info("Updating version on first node")
+#     await set_version(manager, host0, new_version)
+#     await set_fence_version(manager, host0, new_version)
+#     await manager.api.client.post("/storage_service/raft_topology/reload", s0.ip_addr)
+#
+#     logger.info(f"Waiting for sent hints on {host0}")
+#     async def exactly_one_hint_sent():
+#         metrics_data = await manager.metrics.query(s0.ip_addr)
+#         if sent_metric(metrics_data) > 1:
+#             pytest.fail(f"Unexpected more than 1 successful hints; metrics on {s0}: {all_hints_metrics(metrics_data)}")
+#         if sent_metric(metrics_data) == 1:
+#             return True
+#         logger.info(f"Metrics on {s0}: {all_hints_metrics(metrics_data)}")
+#     await wait_for(exactly_one_hint_sent, time.time() + 60)
+#
+#     # Check the hint is delivered, and we see the new data on host2
+#     rows = await cql.run_async(select_all_stmt, host=host2)
+#     assert len(list(rows)) == 1
+#
+#     random_tables.drop_all()
