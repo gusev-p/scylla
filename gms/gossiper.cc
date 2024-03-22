@@ -597,6 +597,7 @@ future<> gossiper::do_apply_state_locally(gms::inet_address node, endpoint_state
                     logger.debug("Ignoring remote version {} <= {} for {}", remote_max_version, local_max_version, node);
                 }
                 if (!is_alive(node) && !this->is_dead_state(get_endpoint_state(node))) { // unless of course, it was dead
+                    logger.info("HUJ do_apply_state_locally->mark_alive, ep {}", node);
                     this->mark_alive(node);
                 }
             } else {
@@ -1773,6 +1774,7 @@ future<> gossiper::handle_major_state_change(inet_address ep, endpoint_state eps
         throw std::out_of_range(format("ep={}", ep));
     }
     if (!is_dead_state(*ep_state)) {
+        logger.info("HUJ handle_major_state_change->mark_alive, ep {}", ep);
         mark_alive(ep);
     } else {
         logger.debug("Not marking {} alive due to dead state {}", ep, get_gossip_status(eps));

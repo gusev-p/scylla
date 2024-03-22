@@ -2423,7 +2423,7 @@ future<> storage_service::on_join(gms::inet_address endpoint, gms::endpoint_stat
 future<> storage_service::on_alive(gms::inet_address endpoint, gms::endpoint_state_ptr state, gms::permit_id pid) {
     const auto& tm = get_token_metadata();
     const auto tm_host_id_opt = tm.get_host_id_if_known(endpoint);
-    slogger.debug("endpoint={}/{} on_alive: permit_id={}", endpoint, tm_host_id_opt, pid);
+    slogger.info("HUJ endpoint={}/{} on_alive: permit_id={}", endpoint, tm_host_id_opt, pid);
     bool is_normal_token_owner = tm_host_id_opt && tm.is_normal_token_owner(*tm_host_id_opt);
     if (is_normal_token_owner) {
         co_await notify_up(endpoint);
@@ -2490,7 +2490,7 @@ future<> storage_service::on_change(gms::inet_address endpoint, const gms::appli
             co_await _sys_ks.local().update_peer_info(endpoint, host_id, get_peer_info_for_update(endpoint, states));
         }
         if (states.contains(application_state::RPC_READY)) {
-            slogger.debug("Got application_state::RPC_READY for node {}, is_cql_ready={}", endpoint, ep_state->is_cql_ready());
+            slogger.info("HUJ Got application_state::RPC_READY for node {}, is_cql_ready={}", endpoint, ep_state->is_cql_ready());
             co_await notify_cql_change(endpoint, ep_state->is_cql_ready());
         }
         if (auto it = states.find(application_state::INTERNAL_IP); it != states.end()) {
