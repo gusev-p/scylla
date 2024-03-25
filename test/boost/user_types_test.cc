@@ -177,14 +177,17 @@ SEASTAR_TEST_CASE(test_invalid_user_type_statements) {
                 "Non-frozen UDTs with nested non-frozen collections are not supported");
 
         // cannot have too many fields inside UDTs
+        std::cerr << "DBG1" << std::endl;
         REQUIRE_INVALID(e, format("create type ut4 ({})", boost::algorithm::join(
                 boost::irange(0, 1 << 15) | boost::adaptors::transformed([] (int i) { return format("a{} int", i); }), ", ")),
                 format("A user type cannot have more than {} fields", (1 << 15) - 1));
-
+        std::cerr << "DBG2" << std::endl;
         e.execute_cql(format("create type ut4 ({})", boost::algorithm::join(
                 boost::irange(1, 1 << 15) | boost::adaptors::transformed([] (int i) { return format("a{} int", i); }), ", "))).discard_result().get();
+        std::cerr << "DBG3" << std::endl;
         REQUIRE_INVALID(e, "alter type ut4 add b int",
                 "Cannot add new field to type ks.ut4: maximum number of fields reached");
+        std::cerr << "DBG4" << std::endl;
 
         e.execute_cql("create type ut5 (a int)").discard_result().get();
         e.execute_cql("create table cf3 (a int primary key, b ut5)").discard_result().get();

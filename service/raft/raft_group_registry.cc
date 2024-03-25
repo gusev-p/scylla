@@ -455,6 +455,7 @@ raft_server_with_timeouts::run_with_timeout(Op&& op, const char* op_name,
                 op_name, fmt_loc(timeout->loc)));
         }
         timeout->value = lowres_clock::now() + _group_server.default_op_timeout.value();
+        rslog.info("DBG {}, now {}, timeout {}", op_name, lowres_clock::now(), timeout->value);
     }
     utils::composite_abort_source composite_as;
 
