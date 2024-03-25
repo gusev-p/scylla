@@ -15,6 +15,7 @@
 #include "serializer_impl.hh"
 #include "idl/raft.dist.hh"
 #include "utils/composite_abort_source.hh"
+#include "utils/date.h"
 
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/when_all.hh>
@@ -454,8 +455,11 @@ raft_server_with_timeouts::run_with_timeout(Op&& op, const char* op_name,
                                               "but no value for it has been defined",
                 op_name, fmt_loc(timeout->loc)));
         }
-        timeout->value = lowres_clock::now() + _group_server.default_op_timeout.value();
-        rslog.info("DBG {}, now {}, timeout {}", op_name, lowres_clock::now(), timeout->value);
+        const auto t1 = lowres_clock::now();
+        int64_t t1_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1.time_since_epoch()).count();
+        timeout->value = t1 + _group_server.default_op_timeout.value();
+        int64_t t2_ms = std::chrono::duration_cast<std::chrono::milliseconds>(timeout->value->time_since_epoch()).count();
+        rslog.info("DBG {}, now {}, timeout {}", op_name, t1_ms, t2_ms);
     }
     utils::composite_abort_source composite_as;
 
@@ -466,12 +470,22 @@ raft_server_with_timeouts::run_with_timeout(Op&& op, const char* op_name,
         composite_as.add(*as);
     }
 
+    struct dbg_logger {
+        const char* op_name;
+        ~dbg_logger() {
+            rslog.info("DBG finish {}", op_name);
+        }
+    };
+
     try {
+        rslog.info("DBG start {}", op_name);
+        dbg_logger logger{op_name};
         co_return co_await op(&composite_as.abort_source());
     } catch (const raft::request_aborted& e) {
         if (!expiry.abort_source().abort_requested() || (as && as->abort_requested())) {
             throw;
         }
+        rslog.info("DBG finish {}, TIMEOUT", op_name);
         sstring quorum_message;
         {
             auto fd = _registry.failure_detector();
