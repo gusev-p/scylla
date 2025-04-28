@@ -15,6 +15,7 @@
 #include <unordered_map>
 #include "utils/UUID_gen.hh"
 #include "service/paxos/prepare_response.hh"
+#include "cql3/untyped_result_set.hh"
 
 namespace service {
 class storage_proxy;
@@ -91,6 +92,9 @@ public:
         : _promised_ballot(std::move(promised))
         , _accepted_proposal(std::move(accepted))
         , _most_recent_commit(std::move(commit)) {}
+
+    static paxos_state from_row(partition_key_view key, schema_ptr s, const cql3::untyped_result_set& result_set);
+
     // Replica RPC endpoint for Paxos "prepare" phase.
     static future<prepare_response> prepare(storage_proxy& sp, paxos_store& sys_ks, tracing::trace_state_ptr tr_state, schema_ptr schema,
             const query::read_command& cmd, const partition_key& key, utils::UUID ballot,

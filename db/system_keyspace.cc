@@ -2645,31 +2645,7 @@ future<service::paxos::paxos_state> system_keyspace::load_paxos_state(partition_
     (void)now;
     auto f = execute_cql_with_timeout(cql, timeout, to_legacy(*key.get_compound_type(*s), key.representation()), s->id().uuid());
     return f.then([s, key = std::move(key)] (shared_ptr<cql3::untyped_result_set> results) mutable {
-        if (results->empty()) {
-            return service::paxos::paxos_state();
-        }
-        auto& row = results->one();
-        auto promised = row.has("promise")
-                        ? row.get_as<utils::UUID>("promise") : utils::UUID_gen::min_time_UUID();
-
-        std::optional<service::paxos::proposal> accepted;
-        if (row.has("proposal")) {
-            accepted = service::paxos::proposal(row.get_as<utils::UUID>("proposal_ballot"),
-                    ser::deserialize_from_buffer<>(row.get_blob("proposal"),  std::type_identity<frozen_mutation>(), 0));
-        }
-
-        std::optional<service::paxos::proposal> most_recent;
-        if (row.has("most_recent_commit_at")) {
-            // the value can be missing if it was pruned, supply empty one since
-            // it will not going to be used anyway
-            auto fm = row.has("most_recent_commit") ?
-                     ser::deserialize_from_buffer<>(row.get_blob("most_recent_commit"), std::type_identity<frozen_mutation>(), 0) :
-                     freeze(mutation(s, key));
-            most_recent = service::paxos::proposal(row.get_as<utils::UUID>("most_recent_commit_at"),
-                    std::move(fm));
-        }
-
-        return service::paxos::paxos_state(promised, std::move(accepted), std::move(most_recent));
+        return service::paxos::paxos_state::from_row(key, s, *results);
     });
 }
 

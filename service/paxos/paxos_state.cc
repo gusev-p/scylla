@@ -22,6 +22,9 @@
 #include "db/schema_tables.hh"
 #include "service/migration_manager.hh"
 
+#include "idl/frozen_mutation.dist.hh"
+#include "idl/frozen_mutation.dist.impl.hh"
+
 namespace service::paxos {
 
 logging::logger paxos_state::logger("paxos");
@@ -49,6 +52,34 @@ future<paxos_state::guard> paxos_state::get_cas_lock(const dht::token& key, cloc
     guard m(_coordinator_lock, key, timeout);
     co_await m.lock();
     co_return m;
+}
+
+paxos_state paxos_state::from_row(partition_key_view key, schema_ptr s, const cql3::untyped_result_set& result_set) {
+    if (result_set.empty()) {
+        return service::paxos::paxos_state();
+    }
+    auto& row = result_set.one();
+    auto promised = row.has("promise")
+                    ? row.get_as<utils::UUID>("promise") : utils::UUID_gen::min_time_UUID();
+
+    std::optional<service::paxos::proposal> accepted;
+    if (row.has("proposal")) {
+        accepted = service::paxos::proposal(row.get_as<utils::UUID>("proposal_ballot"),
+                ser::deserialize_from_buffer<>(row.get_blob("proposal"),  std::type_identity<frozen_mutation>(), 0));
+    }
+
+    std::optional<service::paxos::proposal> most_recent;
+    if (row.has("most_recent_commit_at")) {
+        // the value can be missing if it was pruned, supply empty one since
+        // it will not going to be used anyway
+        auto fm = row.has("most_recent_commit")
+            ? ser::deserialize_from_buffer<>(row.get_blob("most_recent_commit"), std::type_identity<frozen_mutation>(), 0)
+            : freeze(mutation(s, key));
+        most_recent = service::paxos::proposal(row.get_as<utils::UUID>("most_recent_commit_at"),
+                std::move(fm));
+    }
+
+    return service::paxos::paxos_state(promised, std::move(accepted), std::move(most_recent));
 }
 
 future<prepare_response> paxos_state::prepare(storage_proxy& sp, paxos_store& paxos_store, tracing::trace_state_ptr tr_state, schema_ptr schema,
