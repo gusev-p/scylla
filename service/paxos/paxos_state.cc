@@ -283,6 +283,13 @@ future<> paxos_state::prune(paxos_store& paxos_store, schema_ptr schema, const p
     return paxos_store.delete_paxos_decision(*schema, key, ballot, timeout);
 }
 
+int32_t paxos_ttl_sec(const schema& s) {
+    // Keep paxos state around for paxos_grace_seconds. If one of the Paxos participants
+    // is down for longer than paxos_grace_seconds it is considered to be dead and must rebootstrap.
+    // Otherwise its Paxos table state will be repaired by nodetool repair or Paxos repair.
+    return std::chrono::duration_cast<std::chrono::seconds>(s.paxos_grace_seconds()).count();
+}
+
 paxos_store::paxos_store(sharded<db::system_keyspace>& sys_ks)
 : _sys_ks(sys_ks)
 {

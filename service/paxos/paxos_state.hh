@@ -109,6 +109,8 @@ public:
             tracing::trace_state_ptr tr_state);
 };
 
+int32_t paxos_ttl_sec(const schema& s);
+
 class paxos_store {
     sharded<db::system_keyspace>& _sys_ks;
 public:

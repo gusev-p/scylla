@@ -2649,19 +2649,12 @@ future<service::paxos::paxos_state> system_keyspace::load_paxos_state(partition_
     });
 }
 
-static int32_t paxos_ttl_sec(const schema& s) {
-    // Keep paxos state around for paxos_grace_seconds. If one of the Paxos participants
-    // is down for longer than paxos_grace_seconds it is considered to be dead and must rebootstrap.
-    // Otherwise its Paxos table state will be repaired by nodetool repair or Paxos repair.
-    return std::chrono::duration_cast<std::chrono::seconds>(s.paxos_grace_seconds()).count();
-}
-
 future<> system_keyspace::save_paxos_promise(const schema& s, const partition_key& key, const utils::UUID& ballot, db::timeout_clock::time_point timeout) {
     static auto cql = format("UPDATE system.{} USING TIMESTAMP ? AND TTL ? SET promise = ? WHERE row_key = ? AND cf_id = ?", PAXOS);
     return execute_cql_with_timeout(cql,
             timeout,
             utils::UUID_gen::micros_timestamp(ballot),
-            paxos_ttl_sec(s),
+            service::paxos::paxos_ttl_sec(s),
             ballot,
             to_legacy(*key.get_compound_type(s), key.representation()),
             s.id().uuid()
@@ -2674,7 +2667,7 @@ future<> system_keyspace::save_paxos_proposal(const schema& s, const service::pa
     return execute_cql_with_timeout(cql,
             timeout,
             utils::UUID_gen::micros_timestamp(proposal.ballot),
-            paxos_ttl_sec(s),
+            service::paxos::paxos_ttl_sec(s),
             proposal.ballot,
             proposal.ballot,
             ser::serialize_to_buffer<bytes>(proposal.update),
@@ -2696,7 +2689,7 @@ future<> system_keyspace::save_paxos_decision(const schema& s, const service::pa
     return execute_cql_with_timeout(cql,
             timeout,
             utils::UUID_gen::micros_timestamp(decision.ballot),
-            paxos_ttl_sec(s),
+            service::paxos::paxos_ttl_sec(s),
             decision.ballot,
             ser::serialize_to_buffer<bytes>(decision.update),
             to_legacy(*key.get_compound_type(s), key.representation()),
