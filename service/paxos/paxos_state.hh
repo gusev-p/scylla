@@ -112,9 +112,41 @@ public:
 int32_t paxos_ttl_sec(const schema& s);
 
 class paxos_store {
+    gms::feature_service& _features;
+    migration_manager& _mm;
     sharded<db::system_keyspace>& _sys_ks;
+
+    future<::shared_ptr<cql3::untyped_result_set>> execute_query(const sstring& query_text,
+        db::timeout_clock::time_point timeout,
+        const std::vector<data_value_or_unset>& params);
+
+    // Executes the given CQL query on the specified table partition.
+    // 
+    // The `cql_format` parameter must contain exactly three `{}` placeholders,
+    // in this order:
+    //   1. Keyspace name
+    //   2. Table (column family) name
+    //   3. Partition key filter
+    //
+    // Any '?' placeholders for bind variables (corresponding to the `args` parameter)
+    // must appear *before* the partition key filter in the query string.
+    //
+    // Parameters:
+    // - s: Target table schema
+    // - key: Partition key to filter on
+    // - timeout: Query timeout
+    // - args: Bind values corresponding to '?' placeholders (if any)
+    template <const std::string_view& cql_format, typename... Args>
+    future<::shared_ptr<cql3::untyped_result_set>> execute_on_partition(
+        const schema& s,
+        partition_key_view key,
+        db::timeout_clock::time_point timeout,
+        Args&&... args);
+
+    bool check_use_tablets(const schema& s) const;
 public:
-    explicit paxos_store(sharded<db::system_keyspace>& sys_ks);
+    explicit paxos_store(gms::feature_service& features, migration_manager& mm, sharded<db::system_keyspace>& sys_ks);
+    future<schema_ptr> inject_columns(schema_ptr);
     future<column_mapping> get_column_mapping(table_id, table_schema_version v);
     future<service::paxos::paxos_state> load_paxos_state(partition_key_view key, schema_ptr s, gc_clock::time_point now,
         db::timeout_clock::time_point timeout);

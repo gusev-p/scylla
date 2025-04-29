@@ -18,12 +18,40 @@
 #include "replica/database.hh"
 
 #include "utils/error_injection.hh"
+#include <fmt/format.h>
+#include <fmt/ranges.h>
 
 #include "db/schema_tables.hh"
 #include "service/migration_manager.hh"
+#include "schema/internal_column_set.hh"
+#include "cql3/query_processor.hh"
+#include "gms/feature_service.hh"
 
 #include "idl/frozen_mutation.dist.hh"
 #include "idl/frozen_mutation.dist.impl.hh"
+
+namespace {
+    struct pk_filter_printer {
+        const schema& s;
+    };
+}
+
+template <>
+struct fmt::formatter<pk_filter_printer>: fmt::formatter<string_view>{
+    auto format(const pk_filter_printer& printer, fmt::format_context& ctx) const {
+        bool is_first = true;
+        auto out = ctx.out();
+        for (const auto& c: printer.s.partition_key_columns()) {
+            if (is_first) {
+                is_first = false;
+            } else {
+                out = fmt::format_to(out, ",");
+            }
+            out = fmt::format_to(out, "{}=?", c.name());
+        }
+        return out;
+    }
+};
 
 namespace service::paxos {
 
@@ -290,35 +318,175 @@ int32_t paxos_ttl_sec(const schema& s) {
     return std::chrono::duration_cast<std::chrono::seconds>(s.paxos_grace_seconds()).count();
 }
 
-paxos_store::paxos_store(sharded<db::system_keyspace>& sys_ks)
-: _sys_ks(sys_ks)
+paxos_store::paxos_store(gms::feature_service& features, migration_manager& mm,
+    sharded<db::system_keyspace>& sys_ks)
+    : _features(features)
+    , _mm(mm)
+    , _sys_ks(sys_ks)
 {
+}
+
+future<schema_ptr> paxos_store::inject_columns(schema_ptr target) {
+    static const auto columns = internal_column_set("$paxos",
+        {},
+        {
+            {"$paxos$promise", timeuuid_type},
+            {"$paxos$most_recent_commit", bytes_type}, // serialization format is defined by frozen_mutation idl
+            {"$paxos$most_recent_commit_at", timeuuid_type},
+            {"$paxos$proposal", bytes_type}, // serialization format is defined by frozen_mutation idl
+            {"$paxos$proposal_ballot", timeuuid_type},
+        }
+    );
+
+    return _mm.inject_internal_columns(target, columns);
 }
 
 future<column_mapping> paxos_store::get_column_mapping(table_id table_id, table_schema_version version) {
     return service::get_column_mapping(_sys_ks.local(), table_id, version);
 }
 
+future<::shared_ptr<cql3::untyped_result_set>> paxos_store::execute_query(const sstring& query_text, db::timeout_clock::time_point timeout, const std::vector<data_value_or_unset>& parameters) {
+    auto& qp = _sys_ks.local().query_processor();
+    const auto prepared_stmt_ptr = qp.prepare_internal(query_text);
+
+    const auto now = db::timeout_clock::now();
+    const auto d = now < timeout ? timeout - now : db::timeout_clock::duration::zero();
+    service::client_state client_state(service::client_state::internal_tag{}, timeout_config{d, d, d, d, d, d, d});
+    service::query_state qs{service::client_state::for_internal_calls(), empty_service_permit()};
+    const auto qo = qp.make_internal_options(prepared_stmt_ptr, parameters, db::consistency_level::ONE);
+    auto msg = co_await qp.do_execute_with_params(qs, prepared_stmt_ptr->statement, qo, std::nullopt);
+    co_return ::make_shared<cql3::untyped_result_set>(msg);
+}
+
+template <const std::string_view& cql_format, typename... Args>
+future<::shared_ptr<cql3::untyped_result_set>> paxos_store::execute_on_partition(
+    const schema& s,
+    partition_key_view key,
+    db::timeout_clock::time_point timeout,
+    Args&&... args)
+{
+    std::vector<data_value_or_unset> params;
+    params.reserve(sizeof...(args) + s.partition_key_size());
+    (params.push_back(data_value{args}), ...);
+    {
+        const auto& pk_type = s.partition_key_type();
+        auto types_it = pk_type->types().begin();
+        for (const auto& c: pk_type->components(key.representation())) {
+            params.push_back((*types_it)->deserialize_value(c));
+            ++types_it;
+        }
+    }
+    return execute_query(fmt::format(cql_format, s.ks_name(), s.cf_name(), pk_filter_printer{s}),
+        timeout, params);
+}
+
+bool paxos_store::check_use_tablets(const schema& s) const {
+    auto& table = s.table();
+    if (!table.uses_tablets()) {
+        return false;
+    }
+    SCYLLA_ASSERT(_features.internal_columns);
+    SCYLLA_ASSERT(s.get_column_definition("$paxos$promise") != nullptr);
+    return true;
+}
+
 future<paxos_state> paxos_store::load_paxos_state(partition_key_view key, schema_ptr s, gc_clock::time_point now,
     db::timeout_clock::time_point timeout)
 {
-    return _sys_ks.local().load_paxos_state(std::move(key), std::move(s), now, timeout);
+    if (!check_use_tablets(*s)) {
+        co_return co_await _sys_ks.local().load_paxos_state(std::move(key), std::move(s), now, timeout);
+    }
+
+    // FIXME: we need execute_cql_with_now()
+    (void)now;
+
+    static constexpr const std::string_view cql = R"(
+        SELECT
+            "$paxos$promise",
+            "$paxos$most_recent_commit",
+            "$paxos$most_recent_commit_at",
+            "$paxos$proposal",
+            "$paxos$proposal_ballot"
+        FROM {}.{}
+        WHERE {})";
+    const auto result_set = co_await execute_on_partition<cql>(*s, std::move(key), timeout);
+    co_return paxos_state::from_row(std::move(key), std::move(s), *result_set);
 }
 
 future<> paxos_store::save_paxos_promise(const schema& s, const partition_key& key, const utils::UUID& ballot, db::timeout_clock::time_point timeout) {
-    return _sys_ks.local().save_paxos_promise(s, key, ballot, timeout);
+    if (!check_use_tablets(s)) {
+        return _sys_ks.local().save_paxos_promise(s, key, ballot, timeout);
+    }
+
+    static constexpr const std::string_view cql = R"(
+        UPDATE {}.{}
+        USING TIMESTAMP ? AND TTL ?
+        SET "$paxos$promise" = ?
+        WHERE {})";
+    return execute_on_partition<cql>(s, key.view(), timeout,
+        utils::UUID_gen::micros_timestamp(ballot), 
+        paxos_ttl_sec(s), 
+        ballot)
+    .discard_result();
 }
 
 future<> paxos_store::save_paxos_proposal(const schema& s, const proposal& proposal, db::timeout_clock::time_point timeout) {
-    return _sys_ks.local().save_paxos_proposal(s, proposal, timeout);
+    if (!check_use_tablets(s)) {
+        return _sys_ks.local().save_paxos_proposal(s, proposal, timeout);
+    }
+
+    static constexpr const std::string_view cql = R"(
+        UPDATE {}.{}
+        USING TIMESTAMP ? AND TTL ?
+        SET
+            "$paxos$promise" = ?,
+            "$paxos$proposal_ballot" = ?,
+            "$paxos$proposal" = ?
+        WHERE {})";
+    return execute_on_partition<cql>(s, proposal.update.key(), timeout, 
+        utils::UUID_gen::micros_timestamp(proposal.ballot),
+        paxos_ttl_sec(s),
+        proposal.ballot,
+        proposal.ballot,
+        ser::serialize_to_buffer<bytes>(proposal.update))
+    .discard_result();
 }
 
 future<> paxos_store::save_paxos_decision(const schema& s, const proposal& decision, db::timeout_clock::time_point timeout) {
-    return _sys_ks.local().save_paxos_decision(s, decision, timeout);
+    if (!check_use_tablets(s)) {
+        return _sys_ks.local().save_paxos_decision(s, decision, timeout);
+    }
+
+    static constexpr const std::string_view cql = R"(
+        UPDATE {}.{}
+        USING TIMESTAMP ? AND TTL ?
+        SET
+            "$paxos$proposal_ballot" = null,
+            "$paxos$proposal" = null,
+            "$paxos$most_recent_commit_at" = ?,
+            "$paxos$most_recent_commit" = ?
+        WHERE {})";
+    return execute_on_partition<cql>(s, decision.update.key(), timeout, 
+        utils::UUID_gen::micros_timestamp(decision.ballot),
+        paxos_ttl_sec(s),
+        decision.ballot,
+        ser::serialize_to_buffer<bytes>(decision.update))
+    .discard_result();
 }
 
 future<> paxos_store::delete_paxos_decision(const schema& s, const partition_key& key, const utils::UUID& ballot, db::timeout_clock::time_point timeout) {
-    return _sys_ks.local().delete_paxos_decision(s, key, ballot, timeout);
+    if (!check_use_tablets(s)) {
+        return _sys_ks.local().delete_paxos_decision(s, key, ballot, timeout);
+    }
+
+    static constexpr const std::string_view cql = R"(
+        DELETE "$paxos$most_recent_commit"
+        FROM {}.{}
+        USING TIMESTAMP ?
+        WHERE {})";
+    return execute_on_partition<cql>(s, key, timeout,
+        utils::UUID_gen::micros_timestamp(ballot))
+    .discard_result();
 }
 
 } // end of namespace "service::paxos"
