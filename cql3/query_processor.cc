@@ -783,7 +783,7 @@ query_options query_processor::make_internal_options(
         const statements::prepared_statement::checked_weak_ptr& p,
         const std::vector<data_value_or_unset>& values,
         db::consistency_level cl,
-        int32_t page_size) const {
+        int32_t page_size) {
     if (p->bound_names.size() != values.size()) {
         throw std::invalid_argument(
                 format("Invalid number of values. Expecting {:d} but got {:d}", p->bound_names.size(), values.size()));
