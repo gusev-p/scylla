@@ -30,16 +30,16 @@ import itertools
 logger = logging.getLogger(__name__)
 
 
-async def inject_error_one_shot_on(manager, error_name, servers):
+async def inject_error_one_shot_on(manager: ManagerClient, error_name, servers):
     errs = [inject_error_one_shot(manager.api, s.ip_addr, error_name) for s in servers]
     await asyncio.gather(*errs)
 
 
-async def inject_error_on(manager, error_name, servers):
+async def inject_error_on(manager: ManagerClient, error_name, servers):
     errs = [manager.api.enable_injection(s.ip_addr, error_name, False) for s in servers]
     await asyncio.gather(*errs)
 
-async def disable_injection_on(manager, error_name, servers):
+async def disable_injection_on(manager: ManagerClient, error_name, servers):
     errs = [manager.api.disable_injection(s.ip_addr, error_name) for s in servers]
     await asyncio.gather(*errs)
 
@@ -1999,3 +1999,101 @@ async def test_lwt(manager: ManagerClient):
 
         await cql.run_async(f"DROP TABLE {ks}.test")
         assert not await paxos_state_table_exists()
+
+
+@pytest.mark.asyncio
+@skip_mode('release', 'error injections are not supported in release mode')
+async def test_lwt_state_is_preserved_on_tablet_migration(manager: ManagerClient):
+    # Scenario:
+    # 1. Cells c1 and c2 of some partition are not set.
+    # 2. An LWT on {n1, n2} writes 1 to c1, stores accepts on {n1, n2} and learn on n1.
+    # 3. Tablet migrates from n2 to n4.
+    # 4. Another LWT comes, accepts/learns on {n3, n4} a value "2 if c1 != 1" for the cell c2.
+    #    If paxos state was not preserved, this LWT would succeed since the quorum {n3, n4} is completely
+    #    unaware of the decided value 1 for c1. We would abandon the previous failed LWT here and
+    #    commit a new write which contradicts it. This seems OK so far, since the first LWT wasn’t observed
+    #    by the user.
+    # 5. Do the SERIAL (paxos) read of c1 and c2 from {n1, n4}. If paxos state was not preserved, this
+    #    read would see c1==1 (from learned value on n1) and c2 == 2 (from n4),
+    #    which contradicts the CQL from 4. This would be possible because the Paxos repair
+    #    procedure in begin_and_repair_paxos doesn’t replay all mutations up to the last
+    #    committed one, only the last committed mutation itself.
+
+    logger.info("Bootstrap a cluster with three nodes")
+    cmdline = [
+        '--logger-log-level', 'paxos=trace'
+    ]
+    config = {
+        'rf_rack_valid_keyspaces': False,
+        'experimental_features': ['lwt-with-tablets']
+    }
+    servers = await manager.servers_add(3, cmdline=cmdline, config=config)
+    cql = manager.get_cql()
+
+    logger.info("Resolve hosts")
+    hosts = await wait_for_cql_and_get_hosts(cql, servers, time.time() + 60)
+
+    logger.info("Disable tablet balancing")
+    await asyncio.gather(*(manager.api.disable_tablet_balancing(s.ip_addr) for s in servers))
+
+    logger.info("Create a keyspace")
+    async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 3} AND tablets = {'initial': 1}") as ks:
+        logger.info("Create a table")
+        await cql.run_async(f"CREATE TABLE {ks}.test (pk int PRIMARY KEY, c1 int, c2 int);")
+
+        # Step 2: stop n3 and inject failure before learn on n2, so that
+        # the paxos proposal for the LWT would be accepted
+        # only on n1 and n2 and learnt only on n1. The new value for the CAS
+        # operation would be decided.
+        # Note: we use cl_learn=1 here to simplify the test, the same problem
+        # would be with the default cl_learn=quorum, if learn succeeded on n1 but
+        # failed on n2.
+        logger.info("Stop n3")
+        await manager.server_stop_gracefully(servers[2].server_id)
+        logger.info("Inject paxos_error_before_learn on n2")
+        await inject_error_one_shot_on(manager, "paxos_error_before_learn", [servers[1]])
+        logger.info("Execute CAS(c1 := 1)")
+        lwt1 = SimpleStatement(f"INSERT INTO {ks}.test (pk, c1) VALUES (1, 1) IF NOT EXISTS",
+                               consistency_level=ConsistencyLevel.ONE)
+        await cql.run_async(lwt1, host=hosts[0])
+
+        # Step3: start n3 and n4, migrate the single table tablet from n2 to n4.
+        logger.info("Start n3")
+        await manager.server_start(servers[2].server_id)
+        logger.info("Starting n")
+        servers += [await manager.server_add(cmdline=cmdline, config=config)]
+        n4_host_id = await manager.get_host_id(servers[3].server_id)
+        logger.info("Migrating the tablet from n1 to n4")
+        n2_host_id = await manager.get_host_id(servers[1].server_id)
+        tablets = await get_all_tablet_replicas(manager, servers[0], ks, 'test')
+        assert len(tablets) == 1
+        tablet = tablets[0]
+        n2_replica = next(r for r in tablet.replicas if r[0] == n2_host_id)
+        await manager.api.move_tablet(servers[0].ip_addr, ks, "test", *n2_replica,
+                                      *(n4_host_id, 0), tablet.last_token)
+
+        # Step 4: stop nodes n1, n2 so that the paxos proposal for the LWT
+        # would be accepted only on n3, n4.
+        logger.info("Stop n1")
+        await manager.server_stop_gracefully(servers[0].server_id)
+        logger.info("Stop n2")
+        await manager.server_stop_gracefully(servers[1].server_id)
+        logger.info("Execute CAS(c2 := 2 IF c1 != 1)")
+        await cql.run_async(f"UPDATE {ks}.test SET c2 = 2 WHERE pk = 1 IF c1 != 1", host=hosts[2])
+
+        # Step 5: start n1, stop n3, SERIAL read communicates with n1, n4
+        logger.info("Start n1")
+        await manager.server_start(servers[0].server_id)
+        logger.info("Stop n3")
+        await manager.server_stop_gracefully(servers[2].server_id)
+        logger.info("Execute paxos read")
+        lwt_read = SimpleStatement(f"SELECT * FROM {ks}.test WHERE pk = 1;",
+                                   consistency_level=ConsistencyLevel.SERIAL)
+        rows = await cql.run_async(lwt_read)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.pk == 1
+        assert row.c1 == 1
+        assert row.c2 is None
+
+        await manager.server_start(servers[1].server_id)
