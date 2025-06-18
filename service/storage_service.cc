@@ -817,6 +817,10 @@ future<> storage_service::topology_state_load(state_change_hint hint) {
 
     for (const auto& gen_id : _topology_state_machine._topology.committed_cdc_generations) {
         rtlogger.trace("topology_state_load: process committed cdc generation {}", gen_id);
+        co_await utils::get_local_injector().inject("topology_state_load_before_update_cdc", [](auto& handler) -> future<> {
+            rtlogger.info("topology_state_load_before_update_cdc hit, wait for message");
+            co_await handler.wait_for_message(db::timeout_clock::now() + std::chrono::minutes(5));
+        });
         co_await _cdc_gens.local().handle_cdc_generation(gen_id);
         if (gen_id == _topology_state_machine._topology.committed_cdc_generations.back()) {
             co_await _sys_ks.local().update_cdc_generation_id(gen_id);
@@ -4698,9 +4702,17 @@ future<> storage_service::drain() {
 }
 
 future<> storage_service::do_drain() {
+    // Need to stop transport before group0, otherwise RPCs may fail with raft_group_not_found.
     co_await stop_transport();
 
+    // group0 persistence relies on local storage, so we need to stop group0 first.
+    // This must be kept in sync with defer_verbose_shutdown for group0 in main.cc to
+    // handle the case when initialization fails before reaching drain_on_shutdown for ss.
+    _sl_controller.local().abort_group0_operations();
     co_await wait_for_group0_stop();
+    if (_group0) {
+        co_await _group0->abort();
+    }
 
     co_await tracing::tracing::tracing_instance().invoke_on_all(&tracing::tracing::shutdown);
 
@@ -5525,26 +5537,24 @@ future<> storage_service::keyspace_changed(const sstring& ks_name) {
     return update_topology_change_info(reason, acquire_merge_lock::no);
 }
 
-future<locator::mutable_token_metadata_ptr> storage_service::prepare_tablet_metadata(const locator::tablet_metadata_change_hint& hint) {
-    SCYLLA_ASSERT(this_shard_id() == 0);
-    auto tmptr = co_await get_mutable_token_metadata_ptr();
-    if (hint) {
-        co_await replica::update_tablet_metadata(_db.local(), _qp, tmptr->tablets(), hint);
-    } else {
-        tmptr->set_tablets(co_await replica::read_tablet_metadata(_qp));
+void storage_service::on_update_tablet_metadata(const locator::tablet_metadata_change_hint& hint) {
+    if (this_shard_id() != 0) {
+        // replicate_to_all_cores() takes care of other shards.
+        return;
     }
-    tmptr->tablets().set_balancing_enabled(_topology_state_machine._topology.tablet_balancing_enabled);
-    co_return tmptr;
+    load_tablet_metadata(hint).get();
+    _topology_state_machine.event.broadcast(); // wake up load balancer.
 }
 
-future<> storage_service::commit_tablet_metadata(locator::mutable_token_metadata_ptr tmptr) {
-    co_await replicate_to_all_cores(std::move(tmptr));
-    _topology_state_machine.event.broadcast();
-}
-
-future<> storage_service::update_tablet_metadata(const locator::tablet_metadata_change_hint& hint) {
-    co_await commit_tablet_metadata(
-            co_await prepare_tablet_metadata(hint));
+future<> storage_service::load_tablet_metadata(const locator::tablet_metadata_change_hint& hint) {
+    return mutate_token_metadata([this, &hint] (mutable_token_metadata_ptr tmptr) -> future<> {
+        if (hint) {
+            co_await replica::update_tablet_metadata(_db.local(), _qp, tmptr->tablets(), hint);
+        } else {
+            tmptr->set_tablets(co_await replica::read_tablet_metadata(_qp));
+        }
+        tmptr->tablets().set_balancing_enabled(_topology_state_machine._topology.tablet_balancing_enabled);
+    }, acquire_merge_lock::no);
 }
 
 future<> storage_service::process_tablet_split_candidate(table_id table) noexcept {
@@ -7550,7 +7560,7 @@ storage_service::get_splits(const sstring& ks_name, const sstring& cf_name, wrap
     } else {
         unwrapped.emplace_back(std::move(range));
     }
-    tokens.push_back(std::move(unwrapped[0].start().value_or(range_type::bound(dht::minimum_token()))).value());
+    tokens.push_back(std::move(unwrapped[0].start_copy().value_or(range_type::bound(dht::minimum_token()))).value());
     for (auto&& r : unwrapped) {
         std::vector<dht::token> range_tokens;
         for (auto &&sst : *sstables) {
@@ -7561,7 +7571,7 @@ storage_service::get_splits(const sstring& ks_name, const sstring& cf_name, wrap
         std::sort(range_tokens.begin(), range_tokens.end());
         std::move(range_tokens.begin(), range_tokens.end(), std::back_inserter(tokens));
     }
-    tokens.push_back(std::move(unwrapped[unwrapped.size() - 1].end().value_or(range_type::bound(dht::maximum_token()))).value());
+    tokens.push_back(std::move(unwrapped[unwrapped.size() - 1].end_copy().value_or(range_type::bound(dht::maximum_token()))).value());
 
     // split_count should be much smaller than number of key samples, to avoid huge sampling error
     constexpr uint32_t min_samples_per_split = 4;

@@ -4384,8 +4384,10 @@ void storage_proxy::send_to_live_endpoints(storage_proxy::response_id_type respo
                 msg = stale->what();
             } else if (try_catch_nested<rpc::closed_error>(eptr)) {
                 // ignore, disconnect will be logged by gossiper
-            } else if (try_catch_nested<seastar::gate_closed_exception>(eptr)) {
-                // may happen during shutdown, ignore it
+            } else if (const auto* e = try_catch_nested<seastar::gate_closed_exception>(eptr)) {
+                // may happen during shutdown, log and ignore it
+                slogger.warn("gate_closed_exception during mutation write to {}: {}",
+                    coordinator, e->what());
             } else if (try_catch<timed_out_error>(eptr)) {
                 // from lmutate(). Ignore so that logs are not flooded
                 // database total_writes_timedout counter was incremented.
@@ -6135,7 +6137,7 @@ storage_proxy::query_partition_key_range_concurrent(storage_proxy::clock_type::t
                     }
 
                     // If we get there, merge this range and the next one
-                    range = dht::partition_range(range.start(), next_range.end());
+                    range = dht::partition_range(range.start(), next_range.end());  
                     live_endpoints = std::move(merged);
                     merged_preferred_replicas = std::move(current_merged_preferred_replicas);
                     filtered_endpoints = std::move(filtered_merged);
