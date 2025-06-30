@@ -862,7 +862,7 @@ select_statement::execute_without_checking_exception_message_non_aggregate_unpag
                         command,
                         std::move(prange),
                         options.get_consistency(),
-                        {timeout, state.get_permit(), state.get_client_state(), state.get_trace_state()}).then(utils::result_wrap([] (service::storage_proxy::coordinator_query_result qr) {
+                        {timeout, state.get_permit(), state.get_client_state(), state.get_trace_state(), {}, {}, options.get_specific_options().replica_local}).then(utils::result_wrap([] (service::storage_proxy::coordinator_query_result qr) {
                     return make_ready_future<coordinator_result<foreign_ptr<lw_shared_ptr<query::result>>>>(std::move(qr.query_result));
                 }));
             }, std::move(merger));
@@ -870,7 +870,7 @@ select_statement::execute_without_checking_exception_message_non_aggregate_unpag
             return this->process_results(std::move(result), cmd, options, now);
         }));
     } else {
-        return qp.proxy().query_result(_query_schema, cmd, std::move(partition_ranges), options.get_consistency(), {timeout, state.get_permit(), state.get_client_state(), state.get_trace_state()})
+        return qp.proxy().query_result(_query_schema, cmd, std::move(partition_ranges), options.get_consistency(), {timeout, state.get_permit(), state.get_client_state(), state.get_trace_state(), {}, {}, options.get_specific_options().replica_local})
             .then(wrap_result_to_error_message([this, &options, now, cmd] (service::storage_proxy::coordinator_query_result qr) {
                 return this->process_results(std::move(qr.query_result), cmd, options, now);
             }));
