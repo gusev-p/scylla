@@ -376,7 +376,9 @@ static sstring paxos_state_table_name(const schema& s) {
 
 static schema_ptr try_get_paxos_state_schema(const replica::database& db, const schema& s) {
     // Throw if the base table has been dropped or recreated.
-    s.table();
+    // We can't rely on s.table() since a table is stored in tables_metadata as an lw_shared_ptr,
+    // and can live for a while without being referenced from it.
+    db.find_column_family(s.id());
 
     const auto& tables = db.get_tables_metadata();
     const auto state_table_id = tables.get_table_id_if_exists({s.ks_name(), paxos_state_table_name(s)});
