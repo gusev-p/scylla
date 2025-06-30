@@ -1167,7 +1167,19 @@ const dht::token& end_token(const dht::partition_range& r) {
 }
 
 static unsigned get_cas_shard(const schema& s, dht::token token) {
-    return s.table().shard_for_reads(token);
+    auto erm = s.table().get_effective_replication_map();
+    if (const auto shard = erm->get_sharder(s).try_get_shard_for_reads(token); shard) {
+        return *shard;
+    }
+    if (const auto& rs = erm->get_replication_strategy(); rs.uses_tablets()) {
+        const auto& tablet_map = erm->get_token_metadata().tablets().get_tablet_map(s.id());
+        const auto tablet_id = tablet_map.get_tablet_id(token);
+        return tablet_map.get_primary_replica(tablet_id).shard;   
+    } else {
+        on_internal_error(paxos::paxos_state::logger,
+            format("failed to detect shard for reads for non-tablet-based rs {}, table {}.{}", 
+                rs.get_type(), s.ks_name(), s.cf_name()));
+    }
 }
 
 cas_shard::cas_shard(const schema& s, dht::token token)
