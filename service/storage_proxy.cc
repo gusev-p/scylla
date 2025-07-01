@@ -3880,7 +3880,7 @@ future<result<>> storage_proxy::do_mutate(std::vector<mutation> mutations, db::c
     }).begin();
     return seastar::when_all_succeed(
         mutate_counters(std::ranges::subrange(mutations.begin(), mid), cl, tr_state, permit, timeout),
-        mutate_internal(std::ranges::subrange(mid, mutations.end()), cl, false, tr_state, permit, timeout, std::move(cdc_tracker), allow_limit)
+        mutate_internal(std::ranges::subrange(mid, mutations.end()), cl, false, tr_state, permit, timeout, std::move(cdc_tracker), allow_limit, std::move(options))
     ).then([] (std::tuple<result<>> res) {
         // For now, only mutate_internal returns a result<>
         return std::get<0>(std::move(res));
