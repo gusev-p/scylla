@@ -10,6 +10,7 @@
  */
 
 #include "storage_service.hh"
+#include "utils/chunked_vector.hh"
 #include "utils/disk_space_monitor.hh"
 #include "compaction/task_manager_module.hh"
 #include "gc_clock.hh"
@@ -3549,9 +3550,9 @@ future<std::map<gms::inet_address, float>> storage_service::effective_ownership(
         //
         // The call for get_range_for_endpoint is done once per endpoint
         const auto& tm = *erm->get_token_metadata_ptr();
-        const auto tokens = co_await std::invoke([&]() -> future<std::vector<token>> {
+        const auto tokens = co_await std::invoke([&]() -> future<utils::chunked_vector<token>> {
             if (!erm->get_replication_strategy().uses_tablets()) {
-                return make_ready_future<std::vector<token>>(tm.sorted_tokens());
+                return make_ready_future<utils::chunked_vector<token>>(tm.sorted_tokens());
             } else {
                 auto& cf = ss._db.local().find_column_family(keyspace_name, table_name);
                 const auto& tablets = tm.tablets().get_tablet_map(cf.schema()->id());
@@ -4704,6 +4705,10 @@ future<> storage_service::do_drain() {
     // Need to stop transport before group0, otherwise RPCs may fail with raft_group_not_found.
     co_await stop_transport();
 
+    // Drain view builder before group0, because the view builder uses group0 to coordinate view building.
+    // Drain after transport is stopped, because view_builder::drain aborts view writes for user writes as well.
+    co_await _view_builder.invoke_on_all(&db::view::view_builder::drain);
+
     // group0 persistence relies on local storage, so we need to stop group0 first.
     // This must be kept in sync with defer_verbose_shutdown for group0 in main.cc to
     // handle the case when initialization fails before reaching drain_on_shutdown for ss.
@@ -4719,7 +4724,6 @@ future<> storage_service::do_drain() {
         return bm.drain();
     });
 
-    co_await _view_builder.invoke_on_all(&db::view::view_builder::drain);
     co_await _db.invoke_on_all(&replica::database::drain);
     co_await _sys_ks.invoke_on_all(&db::system_keyspace::shutdown);
     co_await _repair.invoke_on_all(&repair_service::shutdown);
