@@ -202,6 +202,15 @@ class WorkloadManager:
             try:
                 res = await self.cql.run_async(update)
                 applied = bool(res and res[0].applied)
+                if applied:
+                    self.tracker.increment_success(pk, worker_id)
+                else:
+                    entry = self.tracker.log_entry(
+                        worker_id, phase="non_apply_no_timeout", prev_val=prev_val, new_val=new_val,
+                        applied=applied, error=None, pk=pk, operation_id=operation_id
+                    )
+                    raise LWTNonApplyError(pk=pk, worker_id=worker_id, prev_val=prev_val,
+                                        new_val=new_val, operation_id=operation_id, payload=entry)
             except (WriteTimeout, OperationTimedOut, ReadTimeout) as e:
                 if not is_uncertainty_timeout(e):
                     raise
@@ -215,23 +224,13 @@ class WorkloadManager:
                         current_val = getattr(vrow, f"s{worker_id}")
                         assert current_val == new_val or current_val == prev_val
                         applied = (current_val == new_val)
+                        if applied:
+                            self.tracker.increment_success(pk, worker_id)
                         break
                     except (WriteTimeout, OperationTimedOut, ReadTimeout):
                         await asyncio.sleep(0.05)
                         continue
 
-            if applied:
-                self.tracker.increment_success(pk, worker_id)
-            else:
-                entry = self.tracker.log_entry(
-                    worker_id, phase="non_apply_no_timeout", prev_val=prev_val, new_val=new_val,
-                    applied = applied, error = None, pk=pk, operation_id=operation_id
-                )
-                raise LWTNonApplyError(pk=pk, worker_id=worker_id, prev_val=prev_val,
-                                       new_val=new_val, operation_id=operation_id, payload=entry)
-
-            if self.stop_event.is_set():
-                break
 
     async def start_workers(self):
         """Start all worker tasks"""
