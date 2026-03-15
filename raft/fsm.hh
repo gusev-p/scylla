@@ -481,13 +481,17 @@ public:
     std::optional<std::pair<read_id, index_t>> start_read_barrier(server_id requester);
 
     // Update the commit index to the read index (a read barrier result from the leader) if the local entry with the
-    // read index belongs to the current term.
+    // read index belongs to the leader's term.
     //
     // Satisfying the condition above guarantees that the local log matches the current leader's log up to the read
     // index (the Log Matching Property), so the current leader won't drop the local entry with the read index.
     // Moreover, this entry has been committed by the leader, so future leaders also won't drop it (the Leader
     // Completeness Property). Hence, updating the commit index is safe.
-    void maybe_update_commit_idx_for_read(index_t read_idx);
+    //
+    // If `leader_term` is not provided (old leader that doesn't send the term), falls back to comparing against
+    // `get_current_term()`, which is always correct on the leader itself but may be stale on a follower.
+    // In that case we skip the optimization on followers and let the normal replication path handle it.
+    void maybe_update_commit_idx_for_read(index_t read_idx, std::optional<term_t> leader_term);
 
     size_t in_memory_log_size() const {
         return _log.in_memory_size();

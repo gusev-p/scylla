@@ -185,7 +185,10 @@ void raft_group_registry::init_rpc_verbs() {
     ser::raft_rpc_verbs::register_raft_execute_read_barrier_on_leader(&_ms, [handle_raft_rpc] (const rpc::client_info& cinfo, rpc::opt_time_point timeout,
             raft::group_id gid, raft::server_id from, raft::server_id dst) mutable {
         return handle_raft_rpc(cinfo, gid, from, dst, [from] (raft_rpc& rpc) mutable {
-            return rpc.execute_read_barrier(from);
+            return rpc.execute_read_barrier(from)
+                .then([] (std::pair<raft::read_barrier_reply, raft::term_t> res) -> rpc::tuple<raft::read_barrier_reply, raft::term_t> {
+                    return {std::move(res.first), res.second};
+                });
         });
     });
 

@@ -53,7 +53,7 @@ public:
     void send_timeout_now(raft::server_id id, const raft::timeout_now& timeout_now) override;
     void send_read_quorum(raft::server_id id, const raft::read_quorum& check_quorum) override;
     void send_read_quorum_reply(raft::server_id id, const raft::read_quorum_reply& check_quorum_reply) override;
-    future<raft::read_barrier_reply> execute_read_barrier_on_leader(raft::server_id id) override;
+    future<std::pair<raft::read_barrier_reply, std::optional<raft::term_t>>> execute_read_barrier_on_leader(raft::server_id id) override;
     future<raft::add_entry_reply> send_add_entry(raft::server_id id, const raft::command& cmd) override;
     future<raft::add_entry_reply> send_modify_config(raft::server_id id,
         const std::vector<raft::config_member>& add,
@@ -69,7 +69,7 @@ public:
     void timeout_now_request(raft::server_id from, raft::timeout_now timeout_now);
     void read_quorum_request(raft::server_id from, raft::read_quorum check_quorum);
     void read_quorum_reply(raft::server_id from, raft::read_quorum_reply check_quorum_reply);
-    future<raft::read_barrier_reply> execute_read_barrier(raft::server_id);
+    future<std::pair<raft::read_barrier_reply, raft::term_t>> execute_read_barrier(raft::server_id);
 
     future<raft::snapshot_reply> apply_snapshot(raft::server_id from, raft::install_snapshot snp);
     future<raft::add_entry_reply> execute_add_entry(raft::server_id from, raft::command cmd);

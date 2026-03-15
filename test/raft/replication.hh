@@ -745,14 +745,17 @@ public:
             _net[id]->_client->read_quorum_reply(_id, std::move(reply));
         }
     }
-    future<raft::read_barrier_reply> execute_read_barrier_on_leader(raft::server_id id) override {
+    future<std::pair<raft::read_barrier_reply, std::optional<raft::term_t>>> execute_read_barrier_on_leader(raft::server_id id) override {
         if (!_net.count(id)) {
-            return make_exception_future<raft::read_barrier_reply>(std::runtime_error("trying to send a message to an unknown node"));
+            return make_exception_future<std::pair<raft::read_barrier_reply, std::optional<raft::term_t>>>(std::runtime_error("trying to send a message to an unknown node"));
         }
         if (!(*_connected)(id, _id)) {
-            return make_exception_future<raft::read_barrier_reply>(std::runtime_error("cannot send append since nodes are disconnected"));
+            return make_exception_future<std::pair<raft::read_barrier_reply, std::optional<raft::term_t>>>(std::runtime_error("cannot send append since nodes are disconnected"));
         }
-        return _net[id]->_client->execute_read_barrier(_id, nullptr);
+        return _net[id]->_client->execute_read_barrier(_id, nullptr).then(
+            [] (std::pair<raft::read_barrier_reply, raft::term_t> p) {
+                return std::pair{std::move(p.first), std::optional<raft::term_t>(p.second)};
+            });
     }
     void check_known_and_connected(raft::server_id id) {
         if (!_net.count(id)) {

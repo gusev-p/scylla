@@ -418,6 +418,7 @@ class rpc : public raft::rpc {
 
     struct execute_barrier_on_leader_reply {
         raft::read_barrier_reply reply;
+        raft::term_t term;
         reply_id_t reply_id;
     };
 
@@ -486,7 +487,7 @@ private:
     // and push the reply through that promise.
     using reply_promise = std::variant<
         promise<raft::snapshot_reply>,
-        promise<raft::read_barrier_reply>,
+        promise<std::pair<raft::read_barrier_reply, raft::term_t>>,
         promise<raft::add_entry_reply>,
         promise<>
     >;
@@ -594,10 +595,11 @@ public:
             ++_read_barrier_executions;
             (void)[] (rpc& self, raft::server_id src, execute_barrier_on_leader m, gate::holder holder) -> future<> {
                 try {
-                    auto reply = co_await self._client->execute_read_barrier(src, nullptr);
+                    auto [reply, term] = co_await self._client->execute_read_barrier(src, nullptr);
 
                     self._send(src, execute_barrier_on_leader_reply{
                         .reply = std::move(reply),
+                        .term = term,
                         .reply_id = m.reply_id
                     });
                 } catch (...) {
@@ -610,7 +612,7 @@ public:
         [this] (execute_barrier_on_leader_reply m) {
             auto it = _reply_promises.find(m.reply_id);
             if (it != _reply_promises.end()) {
-                std::get<promise<raft::read_barrier_reply>>(it->second).set_value(std::move(m.reply));
+                std::get<promise<std::pair<raft::read_barrier_reply, raft::term_t>>>(it->second).set_value(std::pair{std::move(m.reply), m.term});
             }
         },
         [&] (add_entry_message m) {
@@ -779,10 +781,11 @@ public:
             }
         });
     }
-    virtual future<raft::read_barrier_reply> execute_read_barrier_on_leader(raft::server_id dst) override {
-        co_return co_await with_gate([&] () -> future<raft::read_barrier_reply> {
+    virtual future<std::pair<raft::read_barrier_reply, std::optional<raft::term_t>>> execute_read_barrier_on_leader(raft::server_id dst) override {
+        using result_t = std::pair<raft::read_barrier_reply, raft::term_t>;
+        co_return co_await with_gate([&] () -> future<std::pair<raft::read_barrier_reply, std::optional<raft::term_t>>> {
             auto id = new_reply_id();
-            promise<raft::read_barrier_reply> p;
+            promise<result_t> p;
             auto f = p.get_future();
             _reply_promises.emplace(id, std::move(p));
             auto guard = defer([this, id] { _reply_promises.erase(id); });
@@ -796,8 +799,9 @@ public:
 
             // TODO: catch aborts from the abort_source as well
             try {
-                co_return co_await _timer.with_timeout(_timer.now() + execute_read_barrier_on_leader_timeout, std::move(f));
-            } catch (logical_timer::timed_out<raft::read_barrier_reply>& e) {
+                auto [reply, term] = co_await _timer.with_timeout(_timer.now() + execute_read_barrier_on_leader_timeout, std::move(f));
+                co_return std::pair{std::move(reply), std::optional<raft::term_t>(term)};
+            } catch (logical_timer::timed_out<result_t>& e) {
                 (void) e.get_future().discard_result().handle_exception_type([] (const broken_promise&) { });
                 throw timed_out_error{};
             }

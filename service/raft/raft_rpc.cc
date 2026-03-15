@@ -144,8 +144,17 @@ future<raft::add_entry_reply> raft_rpc::send_modify_config(raft::server_id id,
     return two_way_rpc(sloc::current(), id, std::move(l), add, del);
 }
 
-future<raft::read_barrier_reply> raft_rpc::execute_read_barrier_on_leader(raft::server_id id) {
-    auto l = [] (auto&&...args) -> decltype(auto) { return ser::raft_rpc_verbs::send_raft_execute_read_barrier_on_leader(std::forward<decltype(args)>(args)...); };
+future<std::pair<raft::read_barrier_reply, std::optional<raft::term_t>>> raft_rpc::execute_read_barrier_on_leader(raft::server_id id) {
+    auto l = [] (auto&&...args) -> decltype(auto) { 
+        return ser::raft_rpc_verbs::send_raft_execute_read_barrier_on_leader(std::forward<decltype(args)>(args)...)
+            .then([] (auto t) {
+                auto& [reply, opt_term] = t;
+                return std::pair {
+                    std::move(reply),
+                    opt_term ? std::optional<raft::term_t>(*opt_term) : std::nullopt
+                };
+            });
+    };
     return two_way_rpc(sloc::current(), id, std::move(l));
 }
 
@@ -190,7 +199,7 @@ auto raft_with_gate(gate& g, F&& f) -> decltype(f()) {
     return with_gate(g, std::forward<F>(f));
 }
 
-future<raft::read_barrier_reply> raft_rpc::execute_read_barrier(raft::server_id from) {
+future<std::pair<raft::read_barrier_reply, raft::term_t>> raft_rpc::execute_read_barrier(raft::server_id from) {
     return raft_with_gate(_shutdown_gate, [&] {
         return _client->execute_read_barrier(from, nullptr);
     });

@@ -38,7 +38,8 @@ namespace raft {
 struct active_read {
     read_id id;
     index_t idx;
-    seastar::promise<read_barrier_reply> promise;
+    term_t read_idx_term;
+    seastar::promise<std::pair<read_barrier_reply, term_t>> promise;
     optimized_optional<abort_source::subscription> abort;
 };
 
@@ -74,7 +75,7 @@ public:
     void timeout_now_request(server_id from, timeout_now timeout_now) override;
     void read_quorum_request(server_id from, struct read_quorum read_quorum) override;
     void read_quorum_reply(server_id from, struct read_quorum_reply read_quorum_reply) override;
-    future<read_barrier_reply> execute_read_barrier(server_id, seastar::abort_source* as) override;
+    future<std::pair<read_barrier_reply, term_t>> execute_read_barrier(server_id, seastar::abort_source* as) override;
     future<add_entry_reply> execute_add_entry(server_id from, command cmd, seastar::abort_source* as) override;
     future<add_entry_reply> execute_modify_config(server_id from,
         std::vector<config_member> add, std::vector<server_id> del, seastar::abort_source* as) override;
@@ -306,8 +307,9 @@ private:
 
     virtual future<bool> trigger_snapshot(seastar::abort_source* as) override;
 
-    // Get "safe to read" index from a leader
-    future<read_barrier_reply> get_read_idx(server_id leader, seastar::abort_source* as);
+    // Get "safe to read" index from a leader.
+    // Returns the read barrier reply and an optional leader term for the commit index optimization.
+    future<std::pair<read_barrier_reply, std::optional<term_t>>> get_read_idx(server_id leader, seastar::abort_source* as);
     // Wait for an entry with a specific term to get committed or
     // applied locally.
     future<> wait_for_entry(entry_id eid, wait_type type, seastar::abort_source* as);
@@ -1201,7 +1203,11 @@ future<> server_impl::process_fsm_output(index_t& last_stable, fsm_output&& batc
 
     if (batch.max_read_id_with_quorum) {
         while (!_reads.empty() && _reads.front().id <= batch.max_read_id_with_quorum) {
-            _reads.front().promise.set_value(_reads.front().idx);
+            auto& active_read = _reads.front();
+            active_read.promise.set_value(std::pair {
+                read_barrier_reply{active_read.idx}, 
+                active_read.read_idx_term
+            });
             _reads.pop_front();
         }
     }
@@ -1222,7 +1228,10 @@ future<> server_impl::process_fsm_output(index_t& last_stable, fsm_output&& batc
         abort_snapshot_transfers();
         // abort all read barriers
         for (auto& r : _reads) {
-            r.promise.set_value(not_a_leader{_fsm->current_leader()});
+            r.promise.set_value(std::pair{
+                not_a_leader{_fsm->current_leader()},
+                _fsm->get_current_term()
+            });
         }
         _reads.clear();
     } else if (batch.abort_leadership_transfer) {
@@ -1492,28 +1501,30 @@ future<> server_impl::wait_for_apply(index_t idx, abort_source* as) {
     }
 }
 
-future<read_barrier_reply> server_impl::execute_read_barrier(server_id from, seastar::abort_source* as) {
+future<std::pair<read_barrier_reply, term_t>> server_impl::execute_read_barrier(server_id from, seastar::abort_source* as) {
+    using result_t = std::pair<read_barrier_reply, term_t>;
     check_not_aborted();
 
     logger.trace("[{}] execute_read_barrier start", _id);
 
     std::optional<std::pair<read_id, index_t>> rid;
+    const auto current_term = _fsm->get_current_term();
     try {
         rid = _fsm->start_read_barrier(from);
         if (!rid) {
             // cannot start a barrier yet
-            return make_ready_future<read_barrier_reply>(std::monostate{});
+            return make_ready_future<result_t>(std::monostate{}, current_term);
         }
     } catch (not_a_leader& err) {
-        return make_ready_future<read_barrier_reply>(err);
+        return make_ready_future<result_t>(err, current_term);
     }
     logger.trace("[{}] execute_read_barrier read id is {} for commit idx {}",
         _id, rid->first, rid->second);
     if (as && as->abort_requested()) {
-        return make_exception_future<read_barrier_reply>(
+        return make_exception_future<result_t>(
             request_aborted(format("Abort requested before waiting for read barrier from {}, read id is {} for commit idx {}", from, rid->first, rid->second)));
     }
-    _reads.push_back({rid->first, rid->second, {}, {}});
+    _reads.push_back({rid->first, rid->second, current_term, {}, {}});
     auto read = std::prev(_reads.end());
     if (as) {
         read->abort = as->subscribe([this, read, from] noexcept {
@@ -1526,9 +1537,12 @@ future<read_barrier_reply> server_impl::execute_read_barrier(server_id from, sea
     return read->promise.get_future();
 }
 
-future<read_barrier_reply> server_impl::get_read_idx(server_id leader, seastar::abort_source* as) {
+future<std::pair<read_barrier_reply, std::optional<term_t>>> server_impl::get_read_idx(server_id leader, seastar::abort_source* as) {
     if (_id == leader) {
-        return execute_read_barrier(_id, as);
+        return execute_read_barrier(_id, as)
+            .then([] (std::pair<read_barrier_reply, term_t> res) -> std::pair<read_barrier_reply, std::optional<term_t>> {
+                return {std::move(res.first), {res.second}};
+            });
     } else {
         return _rpc->execute_read_barrier_on_leader(leader);
     }
@@ -1541,8 +1555,9 @@ future<> server_impl::read_barrier(seastar::abort_source* as) {
     co_await do_on_leader_with_retries(as, [&](server_id& leader) -> future<stop_iteration> {
         auto applied = _applied_idx;
         read_barrier_reply res;
+        std::optional<term_t> term;
         try {
-            res = co_await get_read_idx(leader, as);
+            std::tie(res, term) = co_await get_read_idx(leader, as);
         } catch (const transport_error& e) {
             logger.trace("[{}] read_barrier on {} resulted in {}; retrying", _id, leader, e);
             leader = server_id{};
@@ -1561,7 +1576,7 @@ future<> server_impl::read_barrier(seastar::abort_source* as) {
             co_return stop_iteration::no;
         }
         read_idx = std::get<index_t>(res);
-        _fsm->maybe_update_commit_idx_for_read(read_idx);
+        _fsm->maybe_update_commit_idx_for_read(read_idx, term);
         co_return stop_iteration::yes;
     });
 
@@ -1647,7 +1662,7 @@ future<> server_impl::abort(sstring reason) {
 
     // Complete all read attempts with not_a_leader
     for (auto& r: _reads) {
-        r.promise.set_value(raft::not_a_leader{server_id{}});
+        r.promise.set_value(std::pair{raft::not_a_leader{server_id{}}, _fsm->get_current_term()});
     }
     _reads.clear();
 

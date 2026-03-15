@@ -1114,10 +1114,15 @@ std::optional<std::pair<read_id, index_t>> fsm::start_read_barrier(server_id req
     return std::make_pair(id, _commit_idx);
 }
 
-void fsm::maybe_update_commit_idx_for_read(index_t read_idx) {
+void fsm::maybe_update_commit_idx_for_read(index_t read_idx, std::optional<term_t> leader_term) {
+    if (!leader_term) {
+        // Old leader that doesn't send the term. We can't safely verify the log
+        // matches, so skip the optimization and let normal replication handle it.
+        return;
+    }
     // read_idx from the leader might not be replicated to the local node yet.
     const bool in_local_log = read_idx <= _log.last_idx();
-    if (in_local_log && log_term_for(read_idx) == get_current_term()) {
+    if (in_local_log && log_term_for(read_idx) == *leader_term) {
         advance_commit_idx(read_idx);
     }
 }

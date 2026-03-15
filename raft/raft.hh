@@ -628,7 +628,11 @@ public:
     // Should throw a raft::transport_error if the target host is unreachable.
     // In this case, the call will be retried after some time,
     // possibly with a different server_id if the leader has changed by then.
-    virtual future<read_barrier_reply> execute_read_barrier_on_leader(server_id id) = 0;
+    //
+    // Returns a pair of (read_barrier_reply, optional leader term). The term is
+    // used to safely advance the follower's commit index. It may be absent if
+    // the leader is running an older version that doesn't send the term.
+    virtual future<std::pair<read_barrier_reply, std::optional<term_t>>> execute_read_barrier_on_leader(server_id id) = 0;
 
     // Two-way RPC for adding an entry on the leader
     // @param id the leader
@@ -697,8 +701,11 @@ public:
     // Apply incoming snapshot, future resolves when application is complete
     virtual future<snapshot_reply> apply_snapshot(server_id from, install_snapshot snp) = 0;
 
-    // Try to execute read barrier, future resolves when the barrier is completed or error happens
-    virtual future<read_barrier_reply> execute_read_barrier(server_id from, seastar::abort_source* as) = 0;
+    // Try to execute read barrier, future resolves when the barrier is completed or error happens.
+    // Returns the leader's term along with the reply so that followers can safely use the
+    // commit_idx optimization (comparing against the leader's term rather than their own
+    // potentially stale term).
+    virtual future<std::pair<read_barrier_reply, term_t>> execute_read_barrier(server_id from, seastar::abort_source* as) = 0;
 
     // An endpoint on the leader to add an entry to the raft log,
     // as requested by a remote follower.
