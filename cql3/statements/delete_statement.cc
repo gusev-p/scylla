@@ -36,7 +36,7 @@ bool delete_statement::allow_clustering_key_slices() const {
 }
 
 void delete_statement::add_update_for_key(mutation& m, const query::clustering_range& range, const update_parameters& params, const json_cache_opt& json_cache) const {
-    if (_column_operations.empty()) {
+    if (_maker._column_operations.empty()) {
         if (s->clustering_key_size() == 0 || range.is_full()) {
             m.partition().apply(params.make_tombstone());
         } else if (range.is_singular()) {
@@ -48,7 +48,7 @@ void delete_statement::add_update_for_key(mutation& m, const query::clustering_r
         return;
     }
 
-    for (auto&& op : _column_operations) {
+    for (auto&& op : _maker._column_operations) {
         if (op->should_skip_operation(params._options)) {
             continue;
         }

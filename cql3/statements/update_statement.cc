@@ -106,7 +106,7 @@ bool update_statement::allow_clustering_key_slices() const {
 }
 
 void update_statement::execute_operations_for_key(mutation& m, const clustering_key_prefix& prefix, const update_parameters& params, const json_cache_opt& json_cache) const {
-    for (auto&& update : _column_operations) {
+    for (auto&& update : _maker._column_operations) {
         if (update->should_skip_operation(params._options)) {
             continue;
         }
@@ -126,11 +126,11 @@ void update_statement::add_update_for_key(mutation& m, const query::clustering_r
         auto rb = s->regular_begin();
         if (rb->name().empty() || rb->type == empty_type) {
             // There is no column outside the PK. So no operation could have passed through validation
-            throwing_assert(_column_operations.empty());
+            throwing_assert(_maker._column_operations.empty());
             constants::setter(*s->regular_begin(), expr::constant(cql3::raw_value::make_value(bytes()), empty_type)).execute(m, prefix, params);
         } else {
             // dense means we don't have a row marker, so don't accept to set only the PK. See CASSANDRA-5648.
-            if (_column_operations.empty()) {
+            if (_maker._column_operations.empty()) {
                 throw exceptions::invalid_request_exception(format("Column {} is mandatory for this COMPACT STORAGE table", s->regular_begin()->name_as_text()));
             }
         }
@@ -355,7 +355,7 @@ update_statement::prepare_for_broadcast_tables() const {
 
     broadcast_tables::prepared_update query = {
         .key = get_key(restrictions().get_partition_key_restrictions()),
-        .new_value = prepare_new_value(_column_operations),
+        .new_value = prepare_new_value(_maker._column_operations),
         .value_condition = get_value_condition(_condition),
     };
 

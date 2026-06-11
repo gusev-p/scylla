@@ -60,13 +60,12 @@ modification_statement::modification_statement(statement_type type_, uint32_t bo
     : cql_statement_opt_metadata(modification_statement_timeout(*schema_))
     , type{type_}
     , _bound_terms{bound_terms}
-    , _columns_to_read(schema_->all_columns_count())
     , _columns_of_cas_result_set(schema_->all_columns_count())
     , s{schema_}
     , attrs{std::move(attrs_)}
-    , _column_operations{}
     , _stats(stats_)
     , _ks_sel(::is_internal_keyspace(schema_->ks_name()) ? ks_selector::SYSTEM : ks_selector::NONSYSTEM)
+    , _maker(schema_->all_columns_count())
 { }
 
 modification_statement::~modification_statement() = default;
@@ -226,12 +225,12 @@ modification_statement::read_command(query_processor& qp, query::clustering_row_
 
 std::vector<query::clustering_range>
 modification_statement::create_clustering_ranges(const query_options& options, const json_cache_opt& json_cache) const {
-    return _restrictions->get_clustering_bounds(options);
+    return _maker._restrictions->get_clustering_bounds(options);
 }
 
 dht::partition_range_vector
 modification_statement::build_partition_keys(const query_options& options, const json_cache_opt& json_cache) const {
-    auto keys = _restrictions->get_partition_key_ranges(options);
+    auto keys = _maker._restrictions->get_partition_key_ranges(options);
     for (auto const& k : keys) {
         validation::validate_cql_key(*s, *k.start()->value().key());
     }
@@ -279,7 +278,7 @@ modification_statement::do_execute(query_processor& qp, service::query_state& qs
                                "set in the configuration.", cl, cl))));
     }
 
-    _restrictions->validate_primary_key(options);
+    _maker._restrictions->validate_primary_key(options);
 
     if (has_conditions()) {
         auto result = co_await execute_with_condition(qp, qs, options);
@@ -497,13 +496,13 @@ void modification_statement::build_cas_result_set_metadata() {
     }
     // Ensure we prefetch all of the columns of the result set. This is also
     // necessary to check conditions.
-    _columns_to_read.union_with(_columns_of_cas_result_set);
+    _maker._columns_to_read.union_with(_columns_of_cas_result_set);
     _metadata = seastar::make_shared<cql3::metadata>(std::move(columns));
 }
 
 void
 modification_statement::process_where_clause(data_dictionary::database db, expr::expression where_clause, prepare_context& ctx) {
-    _restrictions = restrictions::analyze_statement_restrictions(db, s, type, where_clause, ctx,
+    _maker._restrictions = restrictions::analyze_statement_restrictions(db, s, type, where_clause, ctx,
             applies_only_to_static_columns(), _selects_a_collection, false /* allow_filtering */, restrictions::check_indexes::no);
     /*
      * If there's no clustering columns restriction, we may assume that EXISTS
@@ -512,30 +511,30 @@ modification_statement::process_where_clause(data_dictionary::database db, expr:
      */
     if (_if_exists || _if_not_exists) {
         throwing_assert(!_has_static_column_conditions && !_has_regular_column_conditions);
-        if (s->has_static_columns() && !_restrictions->has_clustering_columns_restriction()) {
+        if (s->has_static_columns() && !_maker._restrictions->has_clustering_columns_restriction()) {
             _has_static_column_conditions = true;
         } else {
             _has_regular_column_conditions = true;
         }
     }
-    if (_restrictions->has_token_restrictions()) {
+    if (_maker._restrictions->has_token_restrictions()) {
         throw exceptions::invalid_request_exception(format("The token function cannot be used in WHERE clauses for UPDATE and DELETE statements: {}",
-                to_string(_restrictions->get_partition_key_restrictions())));
+                to_string(_maker._restrictions->get_partition_key_restrictions())));
     }
-    if (!_restrictions->get_non_pk_restriction().empty()) {
+    if (!_maker._restrictions->get_non_pk_restriction().empty()) {
         throw exceptions::invalid_request_exception(seastar::format("Invalid where clause contains non PRIMARY KEY columns: {}",
-                                                                    fmt::join(_restrictions->get_non_pk_restriction()
+                                                                    fmt::join(_maker._restrictions->get_non_pk_restriction()
                                          | std::views::keys
                                          | std::views::transform([](const column_definition* c) {
                                              return c->name_as_text();
                                          }), ", ")));
     }
-    const expr::expression& ck_restrictions = _restrictions->get_clustering_columns_restrictions();
+    const expr::expression& ck_restrictions = _maker._restrictions->get_clustering_columns_restrictions();
     if (has_slice(ck_restrictions) && !allow_clustering_key_slices()) {
         throw exceptions::invalid_request_exception(
                 format("Invalid operator in where clause {}", to_string(ck_restrictions)));
     }
-    if (_restrictions->has_unrestricted_clustering_columns() && !applies_only_to_static_columns() && !s->is_dense()) {
+    if (_maker._restrictions->has_unrestricted_clustering_columns() && !applies_only_to_static_columns() && !s->is_dense()) {
         // Tomek: Origin had "&& s->comparator->is_composite()" in the condition below.
         // Comparator is a thrift concept, not CQL concept, and we want to avoid
         // using thrift concepts here. I think it's safe to drop this here because the only
@@ -547,22 +546,22 @@ modification_statement::process_where_clause(data_dictionary::database db, expr:
         // the check seems redundant.
         if (require_full_clustering_key()) {
             throw exceptions::invalid_request_exception(format("Missing mandatory PRIMARY KEY part {}",
-                _restrictions->unrestricted_column(column_kind::clustering_key).name_as_text()));
+                _maker._restrictions->unrestricted_column(column_kind::clustering_key).name_as_text()));
         }
         // In general, we can't modify specific columns if not all clustering columns have been specified.
         // However, if we modify only static columns, it's fine since we won't really use the prefix anyway.
         if (!has_slice(ck_restrictions)) {
-            for (auto&& op : _column_operations) {
+            for (auto&& op : _maker._column_operations) {
                 if (!op->column.is_static()) {
                     throw exceptions::invalid_request_exception(format("Primary key column '{}' must be specified in order to modify column '{}'",
-                        _restrictions->unrestricted_column(column_kind::clustering_key).name_as_text(), op->column.name_as_text()));
+                        _maker._restrictions->unrestricted_column(column_kind::clustering_key).name_as_text(), op->column.name_as_text()));
                 }
             }
         }
     }
-    if (_restrictions->has_partition_key_unrestricted_components()) {
+    if (_maker._restrictions->has_partition_key_unrestricted_components()) {
         throw exceptions::invalid_request_exception(format("Missing mandatory PRIMARY KEY part {}",
-            _restrictions->unrestricted_column(column_kind::partition_key).name_as_text()));
+            _maker._restrictions->unrestricted_column(column_kind::partition_key).name_as_text()));
     }
     if (has_conditions()) {
         validate_where_clause_for_conditions();
@@ -628,7 +627,7 @@ modification_statement::prepare(data_dictionary::database db, prepare_context& c
     // Since this cache is only meaningful for LWT queries, just clear the ids
     // if it's not a conditional statement so that the AST nodes don't
     // participate in the caching mechanism later.
-    if (!prepared_stmt->has_conditions() && prepared_stmt->_restrictions) {
+    if (!prepared_stmt->has_conditions() && prepared_stmt->_maker._restrictions) {
         ctx.clear_pk_function_calls_cache();
     }
     prepared_stmt->_may_use_token_aware_routing = ctx.get_partition_key_bind_indexes(*schema).size() != 0;
@@ -751,8 +750,8 @@ void modification_statement::add_operation(std::unique_ptr<operation> op) {
         _selects_a_collection |= op->column.type->is_collection();
     }
     if (op->requires_read()) {
-        _requires_read = true;
-        _columns_to_read.set(op->column.ordinal_id);
+        _maker._requires_read = true;
+        _maker._columns_to_read.set(op->column.ordinal_id);
         if (op->column.type->is_collection() ) {
             auto ctype = static_pointer_cast<const collection_type_impl>(op->column.type);
             if (!ctype->is_multi_cell()) {
@@ -773,7 +772,7 @@ void modification_statement::add_operation(std::unique_ptr<operation> op) {
         _is_raw_counter_shard_write = is_raw_counter_shard_write;
     }
 
-    _column_operations.push_back(std::move(op));
+    _maker._column_operations.push_back(std::move(op));
 }
 
 void modification_statement::inc_cql_stats(bool is_internal) const {
@@ -822,22 +821,22 @@ bool modification_statement::has_if_exist_condition() const {
 
 void modification_statement::validate_where_clause_for_conditions() const {
     // We don't support IN for CAS operation so far
-    if (_restrictions->key_is_in_relation()) {
+    if (_maker._restrictions->key_is_in_relation()) {
         throw exceptions::invalid_request_exception(
                 format("IN on the partition key is not supported with conditional {}",
                     type.is_update() ? "updates" : "deletions"));
     }
 
-    if (_restrictions->clustering_key_restrictions_has_IN()) {
+    if (_maker._restrictions->clustering_key_restrictions_has_IN()) {
         throw exceptions::invalid_request_exception(
                 format("IN on the clustering key columns is not supported with conditional {}",
                     type.is_update() ? "updates" : "deletions"));
     }
-    if (type.is_delete() && (_restrictions->has_unrestricted_clustering_columns() ||
-                !_restrictions->clustering_key_restrictions_has_only_eq())) {
+    if (type.is_delete() && (_maker._restrictions->has_unrestricted_clustering_columns() ||
+                !_maker._restrictions->clustering_key_restrictions_has_only_eq())) {
 
-        bool deletes_regular_columns = _column_operations.empty() ||
-            std::any_of(_column_operations.begin(), _column_operations.end(), [] (auto&& op) {
+        bool deletes_regular_columns = _maker._column_operations.empty() ||
+            std::any_of(_maker._column_operations.begin(), _maker._column_operations.end(), [] (auto&& op) {
                 return !op->column.is_static();
             });
         // For example, primary key is (a, b, c), only a and b are restricted

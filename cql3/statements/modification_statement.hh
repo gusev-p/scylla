@@ -15,6 +15,7 @@
 #include "cql3/cql_statement.hh"
 #include "cql3/restrictions/statement_restrictions.hh"
 #include "cql3/statements/statement_type.hh"
+#include "cql3/statements/mutations_maker.hh"
 #include "exceptions/coordinator_result.hh"
 
 #include <seastar/core/shared_ptr.hh>
@@ -43,16 +44,6 @@ public:
     bool _may_use_token_aware_routing;
 private:
     const uint32_t _bound_terms;
-    // If we have operation on list entries, such as adding or
-    // removing an entry, the modification statement must prefetch
-    // the old values of the list to create an idempotent mutation.
-    // If the statement has conditions, conditional columns must
-    // also be prefetched, to evaluate conditions. If the
-    // statement has IF EXISTS/IF NOT EXISTS, we prefetch all
-    // columns, to match Cassandra behaviour.
-    // This bitset contains a mask of ordinal_id identifiers
-    // of the required columns.
-    column_set _columns_to_read;
     // A CAS statement returns a result set with the columns
     // used in condition expression. This is a mask of ordinal_id
     // identifiers of the required columns. Contains all columns
@@ -65,7 +56,6 @@ public:
     const std::unique_ptr<attributes> attrs;
 
 protected:
-    std::vector<std::unique_ptr<operation>> _column_operations;
     cql_stats& _stats;
 
     expr::expression _condition = expr::conjunction{{}}; // TRUE
@@ -77,9 +67,6 @@ private:
     // Pre-computed during statement prepare.
     bool _has_static_column_conditions = false;
     bool _has_regular_column_conditions = false;
-    // True if any of update operations requires a prefetch.
-    // Pre-computed during statement prepare.
-    bool _requires_read = false;
     // True if any of the update operations requires LWT (an IF condition) for
     // atomicity, e.g. SET col = col + 1 on a non-counter column.
     bool _requires_lwt = false;
@@ -96,9 +83,9 @@ private:
 
     std::optional<bool> _is_raw_counter_shard_write;
 
-protected:
-    shared_ptr<const restrictions::statement_restrictions> _restrictions;
 public:
+    mutations_maker _maker;
+
     typedef std::optional<std::unordered_map<sstring, bytes_opt>> json_cache_opt;
 
     modification_statement(
@@ -144,7 +131,7 @@ public:
     void inc_cql_stats(bool is_internal) const;
 
     const restrictions::statement_restrictions& restrictions() const {
-        return *_restrictions;
+        return *_maker._restrictions;
     }
 
     bool is_conditional() const override;
@@ -187,13 +174,13 @@ private:
 public:
     // True if any of update operations of this statement requires
     // a prefetch of the old cell.
-    bool requires_read() const { return _requires_read; }
+    bool requires_read() const { return _maker._requires_read; }
 
     // True if any of the update operations requires LWT for atomicity.
     bool requires_lwt() const { return _requires_lwt; }
 
     // Columns used in this statement conditions or operations.
-    const column_set& columns_to_read() const { return _columns_to_read; }
+    const column_set& columns_to_read() const { return _maker._columns_to_read; }
 
     // Columns of the statement result set (only CAS statement
     // returns a result set).
