@@ -1731,7 +1731,6 @@ process_batch_internal(service::client_state& client_state, sharded<cql3::query_
 
     modifications.reserve(n.assume_value());
     values.reserve(n.assume_value());
-    bool is_sc = false;
 
     if (init_trace) {
         tracing::begin(trace_state, "Execute batch of CQL3 queries", client_state.get_client_address());
@@ -1790,19 +1789,16 @@ process_batch_internal(service::client_state& client_state, sharded<cql3::query_
                             + std::to_string(int(kind.assume_value()))));
         }
 
-        auto unwrapped_stmt = ps->statement->unwrap_strong_consistency_statement(ps->statement);
-        is_sc |= unwrapped_stmt.get() != ps->statement.get();
-
-        auto modif_statement_ptr = dynamic_pointer_cast<cql3::statements::modification_statement>(unwrapped_stmt);
+        auto modif_statement_ptr = ps->statement->as_modification_statement();
         if (!modif_statement_ptr) {
             return make_exception_future<cql_server::process_fn_return_type>(exceptions::invalid_request_exception("Invalid statement in batch: only UPDATE, INSERT and DELETE statements are allowed."));
         }
         if (init_trace) {
-            tracing::add_table_name(trace_state, modif_statement_ptr->keyspace(), modif_statement_ptr->column_family());
+            tracing::add_table_name(trace_state, modif_statement_ptr->schema()->ks_name(), modif_statement_ptr->schema()->cf_name());
             tracing::add_prepared_statement(trace_state, ps);
         }
 
-        modifications.emplace_back(std::move(modif_statement_ptr), needs_authorization);
+        modifications.emplace_back(modif_statement_ptr, needs_authorization);
 
         std::vector<cql3::raw_value_view> tmp;
         cql3::unset_bind_variable_vector unset;
@@ -1811,11 +1807,10 @@ process_batch_internal(service::client_state& client_state, sharded<cql3::query_
             return make_exception_future<cql_server::process_fn_return_type>(std::move(rvl).assume_error());
         }
 
-        auto stmt = ps->statement;
-        if (stmt->get_bound_terms() != tmp.size()) {
+        if (modif_statement_ptr->bound_terms() != tmp.size()) {
             return make_exception_future<cql_server::process_fn_return_type>(
                     exceptions::invalid_request_exception(format("There were {:d} markers(?) in CQL but {:d} bound variables",
-                            stmt->get_bound_terms(), tmp.size())));
+                            modif_statement_ptr->bound_terms(), tmp.size())));
         }
         values.emplace_back(cql3::raw_value_view_vector_with_unset(std::move(tmp), std::move(unset)));
     }

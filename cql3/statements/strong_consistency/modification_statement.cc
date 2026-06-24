@@ -16,13 +16,14 @@
 #include "cql3/statements/strong_consistency/statement_helpers.hh"
 #include "exceptions/exceptions.hh"
 #include "utils/error_injection.hh"
+#include "cql3/attributes.hh"
 
 namespace cql3::statements::strong_consistency {
 static logging::logger logger("sc_modification_statement");
 
-modification_statement::modification_statement(shared_ptr<base_statement> statement)
+modification_statement::modification_statement(shared_ptr<modification_statement_impl> impl)
     : cql_statement_opt_metadata(&timeout_config::write_timeout)
-    , _statement(std::move(statement))
+    , _impl(std::move(impl))
 {
 }
 
@@ -47,29 +48,33 @@ future<shared_ptr<result_message>> modification_statement::execute_without_check
 {
     validate_consistency_level(options.get_consistency());
 
-    auto timeout = db::timeout_clock::now() + _statement->get_timeout(qs.get_client_state(), options);
-    auto json_cache = base_statement::json_cache_opt{};
-    const auto keys = _statement->build_partition_keys(options, json_cache);
+    const auto& attrs = _impl->attrs();
+    const auto timeout_duration = attrs.is_timeout_set() 
+        ? attrs.get_timeout(options) 
+        : qs.get_client_state().get_timeout_config().write_timeout;
+    const auto timeout = db::timeout_clock::now() + timeout_duration;
+    auto json_cache = json_cache_opt{};
+    const auto keys = _impl->build_partition_keys(options, json_cache);
     if (keys.size() != 1 || !query::is_single_partition(keys[0])) {
         throw exceptions::invalid_request_exception("Strongly consistent queries can only target a single partition");
     }
-    if (_statement->requires_read()) {
+    if (_impl->requires_read()) {
         throw exceptions::invalid_request_exception("Strongly consistent updates don't support data prefetch");
     }
-    if (_statement->is_timestamp_set()) {
+    if (attrs.is_timestamp_set()) {
         throw exceptions::invalid_request_exception("Strongly consistent queries don't support user-provided timestamps");
     }
 
     auto [coordinator, holder] = qp.acquire_strongly_consistent_coordinator();
 
-    auto mutate_result = co_await coordinator.get().mutate(_statement->s,
+    auto mutate_result = co_await coordinator.get().mutate(_impl->schema(),
         keys[0].start()->value().token(),
         [&](api::timestamp_type ts) {
-            const auto prefetch_data = update_parameters::prefetch_data(_statement->s);
-            const auto ttl = _statement->get_time_to_live(options);
-            const auto params = update_parameters(_statement->s, options, ts, ttl, prefetch_data);
-            const auto ranges = _statement->create_clustering_ranges(options, json_cache);
-            auto muts = _statement->apply_updates(keys, ranges, params, json_cache);
+            const auto prefetch_data = update_parameters::prefetch_data(_impl->schema());
+            const auto ttl = _impl->get_time_to_live(options);
+            const auto params = update_parameters(_impl->schema(), options, ts, ttl, prefetch_data);
+            const auto ranges = _impl->create_clustering_ranges(options, json_cache);
+            auto muts = _impl->apply_updates(keys, ranges, params, json_cache);
             if (muts.size() != 1) {
                 on_internal_error(logger, ::format("statement '{}' has unexpected number of mutations {}",
                     raw_cql_statement.linearize(), muts.size()));
@@ -90,14 +95,20 @@ future<shared_ptr<result_message>> modification_statement::execute_without_check
 }
 
 future<> modification_statement::check_access(query_processor& qp, const service::client_state& state) const {
-    return _statement->check_access(qp, state);
+    auto f = state.has_column_family_access(_impl->schema()->ks_name(), _impl->schema()->cf_name(), auth::permission::MODIFY);
+    if (_impl->has_conditions()) {
+        f = f.then([this, &state] {
+           return state.has_column_family_access(_impl->schema()->ks_name(), _impl->schema()->cf_name(), auth::permission::SELECT);
+        });
+    }
+    return f;
 }
 
 uint32_t modification_statement::get_bound_terms() const {
-    return _statement->get_bound_terms();
+    return _impl->bound_terms();
 }
 
 bool modification_statement::depends_on(std::string_view ks_name, std::optional<std::string_view> cf_name) const {
-    return _statement->depends_on(ks_name, cf_name);
+    return _impl->schema()->ks_name() == ks_name && (!cf_name || _impl->schema()->cf_name() == *cf_name);
 }
 }

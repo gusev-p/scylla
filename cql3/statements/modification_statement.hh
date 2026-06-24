@@ -30,19 +30,46 @@ class operation;
 
 namespace statements {
 
-class broadcast_modification_statement;
-
 namespace raw { class modification_statement; }
+
+struct statement_type_desc {
+    bool allow_clustering_key_slices;
+    bool require_full_clustering_key;
+};
+
+using json_cache_opt = std::optional<std::unordered_map<sstring, bytes_opt>>;
 
 /*
  * Abstract parent class of individual modifications, i.e. INSERT, UPDATE and DELETE.
  */
-class modification_statement : public cql_statement_opt_metadata {
-public:
-    const statement_type type;
-    bool _may_use_token_aware_routing;
-private:
+class modification_statement_impl {
+protected:
+    const statement_type _type;
+    const statement_type_desc _desc;
+    const schema_ptr _schema;
     const uint32_t _bound_terms;
+    const std::unique_ptr<attributes> _attrs;
+
+    // A CAS statement returns a result set with the columns
+    // used in condition expression. This is a mask of ordinal_id
+    // identifiers of the required columns. Contains all columns
+    // of a schema if we have IF EXISTS/IF NOT EXISTS. Does *not*
+    // contain LIST columns prefetched to apply updates, unless
+    // these columns are also used in conditions.
+    column_set _columns_of_cas_result_set;
+
+    // True if this statement has column operations that apply to static/regular
+    // columns, respectively.
+    bool _sets_static_columns = false;
+    bool _sets_regular_columns = false;
+    // True if this statement has column operations or conditions for a column
+    // that stores a collection.
+    bool _selects_a_collection = false;
+
+    // True if any of update operations requires a prefetch.
+    // Pre-computed during statement prepare.
+    bool _requires_read = false;
+
     // If we have operation on list entries, such as adding or
     // removing an entry, the modification statement must prefetch
     // the old values of the list to create an idempotent mutation.
@@ -53,128 +80,24 @@ private:
     // This bitset contains a mask of ordinal_id identifiers
     // of the required columns.
     column_set _columns_to_read;
-    // A CAS statement returns a result set with the columns
-    // used in condition expression. This is a mask of ordinal_id
-    // identifiers of the required columns. Contains all columns
-    // of a schema if we have IF EXISTS/IF NOT EXISTS. Does *not*
-    // contain LIST columns prefetched to apply updates, unless
-    // these columns are also used in conditions.
-    column_set _columns_of_cas_result_set;
-public:
-    const schema_ptr s;
-    const std::unique_ptr<attributes> attrs;
 
-protected:
-    std::vector<::shared_ptr<operation>> _column_operations;
-    cql_stats& _stats;
+    std::optional<bool> _is_raw_counter_shard_write;
 
-    expr::expression _condition = expr::conjunction{{}}; // TRUE
-private:
-    const ks_selector _ks_sel;
+    // True if any of the update operations requires LWT (an IF condition) for
+    // atomicity, e.g. SET col = col + 1 on a non-counter column.
+    bool _requires_lwt = false;
+
+    bool _if_not_exists = false;
+    bool _if_exists = false;
 
     // True if this statement has _if_exists or _if_not_exists or other
     // conditions that apply to static/regular columns, respectively.
     // Pre-computed during statement prepare.
     bool _has_static_column_conditions = false;
     bool _has_regular_column_conditions = false;
-    // True if any of update operations requires a prefetch.
-    // Pre-computed during statement prepare.
-    bool _requires_read = false;
-    // True if any of the update operations requires LWT (an IF condition) for
-    // atomicity, e.g. SET col = col + 1 on a non-counter column.
-    bool _requires_lwt = false;
-    bool _if_not_exists = false;
-    bool _if_exists = false;
 
-    // True if this statement has column operations that apply to static/regular
-    // columns, respectively.
-    bool _sets_static_columns = false;
-    bool _sets_regular_columns = false;
-    // True if this statement has column operations or conditions for a column
-    // that stores a collection.
-    bool _selects_a_collection = false;
+    seastar::shared_ptr<metadata> _metadata;
 
-    std::optional<bool> _is_raw_counter_shard_write;
-
-protected:
-    shared_ptr<const restrictions::statement_restrictions> _restrictions;
-public:
-    typedef std::optional<std::unordered_map<sstring, bytes_opt>> json_cache_opt;
-
-    modification_statement(
-            statement_type type_,
-            uint32_t bound_terms,
-            schema_ptr schema_,
-            std::unique_ptr<attributes> attrs_,
-            cql_stats& stats_);
-
-    virtual ~modification_statement() override;
-
-    virtual bool require_full_clustering_key() const = 0;
-
-    virtual bool allow_clustering_key_slices() const = 0;
-
-    virtual void add_update_for_key(mutation& m, const query::clustering_range& range, const update_parameters& params, const json_cache_opt& json_cache) const = 0;
-
-    uint32_t get_bound_terms() const override;
-
-    const sstring& keyspace() const;
-
-    const sstring& column_family() const;
-
-    bool is_counter() const;
-
-    bool is_view() const;
-
-    int64_t get_timestamp(int64_t now, const query_options& options) const;
-
-    bool is_timestamp_set() const;
-
-    std::optional<gc_clock::duration> get_time_to_live(const query_options& options) const;
-
-    future<> check_access(query_processor& qp, const service::client_state& state) const override;
-
-    // Validate before execute, using client state and current schema
-    void validate(query_processor&, const service::client_state& state) const override;
-
-    bool depends_on(std::string_view ks_name, std::optional<std::string_view> cf_name) const override;
-
-    void add_operation(::shared_ptr<operation> op);
-
-    void inc_cql_stats(bool is_internal) const;
-
-    const restrictions::statement_restrictions& restrictions() const {
-        return *_restrictions;
-    }
-
-    bool is_conditional() const override;
-
-public:
-    void analyze_condition(expr::expression cond);
-
-    void set_if_not_exist_condition();
-
-    bool has_if_not_exist_condition() const;
-
-    void set_if_exist_condition();
-
-    bool has_if_exist_condition() const;
-
-    bool is_raw_counter_shard_write() const {
-        return _is_raw_counter_shard_write.value_or(false);
-    }
-
-    void process_where_clause(data_dictionary::database db, expr::expression where_clause, prepare_context& ctx);
-
-    // CAS statement returns a result set. Prepare result set metadata
-    // so that get_result_metadata() returns a meaningful value.
-    void build_cas_result_set_metadata();
-
-public:
-    virtual dht::partition_range_vector build_partition_keys(const query_options& options, const json_cache_opt& json_cache) const;
-    virtual query::clustering_row_ranges create_clustering_ranges(const query_options& options, const json_cache_opt& json_cache) const;
-
-private:
     // Return true if this statement doesn't update or read any regular rows, only static rows.
     // Note, it isn't enough to just check !_sets_regular_columns && _regular_conditions.empty(),
     // because a DELETE statement that deletes whole rows (DELETE FROM ...) technically doesn't
@@ -184,24 +107,100 @@ private:
     bool applies_only_to_static_columns() const {
         return _sets_static_columns && !_sets_regular_columns && !_has_regular_column_conditions;
     }
+
+    expr::expression _condition = expr::conjunction{{}}; // TRUE
+    shared_ptr<const restrictions::statement_restrictions> _restrictions;
+    std::vector<::shared_ptr<operation>> _column_operations;
+
+    /**
+     * If there are conditions on the statement, this is called after the where clause and conditions have been
+     * processed to check that they are compatible.
+     * @throws InvalidRequestException
+     */
+    void validate_where_clause_for_conditions() const;
+
 public:
-    // True if any of update operations of this statement requires
-    // a prefetch of the old cell.
-    bool requires_read() const { return _requires_read; }
+    modification_statement_impl(const statement_type type,
+        statement_type_desc desc,
+        schema_ptr schema,
+        uint32_t bound_terms,
+        std::unique_ptr<attributes> attrs);
+
+    /// 
+    /// Prepare time non-constant API:
+    ///
+    void add_operation(::shared_ptr<operation> op);
+
+    void set_if_not_exist_condition();
+
+    void set_if_exist_condition();
+
+    void analyze_condition(expr::expression cond);
+
+    // CAS statement returns a result set. Prepare result set metadata
+    // so that get_result_metadata() returns a meaningful value.
+    void build_cas_result_set_metadata();
+
+    void process_where_clause(data_dictionary::database db, expr::expression where_clause, prepare_context& ctx);
+
+    friend class raw::modification_statement;
+
+    ///
+    /// Runtime constant API:
+    ///
+
+    const schema_ptr& schema() const { return _schema; }
+    statement_type type() const { return _type; }
+
+    // True if the statement has IF conditions. Pre-computed during prepare.
+    bool has_conditions() const { return _has_regular_column_conditions || _has_static_column_conditions; }
 
     // True if any of the update operations requires LWT for atomicity.
     bool requires_lwt() const { return _requires_lwt; }
 
-    // Columns used in this statement conditions or operations.
-    const column_set& columns_to_read() const { return _columns_to_read; }
+    const restrictions::statement_restrictions& restrictions() const {
+        return *_restrictions;
+    }
+
+    // True if this statement needs to read only static column values to check if it can be applied.
+    bool has_only_static_column_conditions() const { return !_has_regular_column_conditions && _has_static_column_conditions; }
+
+    bool has_if_not_exist_condition() const {
+        return _if_not_exists;
+    }
+
+    bool has_if_exist_condition() const {
+        return _if_exists;
+    }
 
     // Columns of the statement result set (only CAS statement
     // returns a result set).
     const column_set& columns_of_cas_result_set() const { return _columns_of_cas_result_set; }
 
-    // Build a read_command instance to fetch the previous mutation from storage. The mutation is
-    // fetched if we need to check LWT conditions or apply updates to non-frozen list elements.
-    lw_shared_ptr<query::read_command> read_command(query_processor& qp, query::clustering_row_ranges ranges, db::consistency_level cl) const;
+    // Columns used in this statement conditions or operations.
+    const column_set& columns_to_read() const { return _columns_to_read; }
+
+    // True if any of update operations of this statement requires
+    // a prefetch of the old cell.
+    bool requires_read() const { return _requires_read; }
+
+    bool is_raw_counter_shard_write() const {
+        return _is_raw_counter_shard_write.value_or(false);
+    }
+
+    std::optional<gc_clock::duration> get_time_to_live(const query_options& options) const;
+
+    const shared_ptr<metadata>& metadata() const { return _metadata; }
+
+    const attributes& attrs() const { return *_attrs; }
+
+    uint32_t bound_terms() const { return _bound_terms; }
+
+    virtual void add_update_for_key(mutation& m, const query::clustering_range& range, const update_parameters& params, const json_cache_opt& json_cache) const = 0;
+    virtual dht::partition_range_vector build_partition_keys(const query_options& options, const json_cache_opt& json_cache) const;
+    virtual query::clustering_row_ranges create_clustering_ranges(const query_options& options, const json_cache_opt& json_cache) const;
+    virtual json_cache_opt maybe_prepare_json_cache(const query_options& options) const;
+
     // Create a mutation object for the update operation represented by this modification statement.
     // A single mutation object for lightweight transactions, which can only span one partition, or a vector
     // of mutations, one per partition key, for statements which affect multiple partition keys,
@@ -221,33 +220,60 @@ public:
      * @return whether the conditions represented by this statement apply or not.
      */
     bool applies_to(const selection::selection* selection, const update_parameters::prefetch_data::row* row, const query_options& options) const;
+};
 
-private:
+class modification_statement : public cql_statement_opt_metadata {
+    ::shared_ptr<modification_statement_impl> _impl;
+    const bool _may_use_token_aware_routing;
+    cql_stats& _stats;
+    const ks_selector _ks_sel;
+
     future<::shared_ptr<cql_transport::messages::result_message>>
     do_execute(query_processor& qp, service::query_state& qs, const query_options& options) const;
-    friend class modification_statement_executor;
-public:
-    // True if the statement has IF conditions. Pre-computed during prepare.
-    bool has_conditions() const { return _has_regular_column_conditions || _has_static_column_conditions; }
-    // True if the statement has IF conditions that apply to static columns.
-    bool has_static_column_conditions() const { return _has_static_column_conditions; }
-    // True if this statement needs to read only static column values to check if it can be applied.
-    bool has_only_static_column_conditions() const { return !_has_regular_column_conditions && _has_static_column_conditions; }
 
-    virtual future<::shared_ptr<cql_transport::messages::result_message>>
-    execute(query_processor& qp, service::query_state& qs, const query_options& options, std::optional<service::group0_guard> guard) const override;
-
-    virtual future<::shared_ptr<cql_transport::messages::result_message>>
-    execute_without_checking_exception_message(query_processor& qp, service::query_state& qs, const query_options& options, std::optional<service::group0_guard> guard) const override;
-
-private:
     future<exceptions::coordinator_result<>>
     execute_without_condition(query_processor& qp, service::query_state& qs, const query_options& options, json_cache_opt& json_cache, std::vector<dht::partition_range> keys) const;
 
     future<::shared_ptr<cql_transport::messages::result_message>>
     execute_with_condition(query_processor& qp, service::query_state& qs, const query_options& options) const;
 
+    friend class modification_statement_executor;
+
 public:
+    modification_statement(
+            ::shared_ptr<modification_statement_impl> impl,
+            bool may_use_token_aware_routing,
+            cql_stats& stats);
+
+    virtual ~modification_statement() override;
+
+    uint32_t get_bound_terms() const override;
+
+    const sstring& keyspace() const;
+
+    const sstring& column_family() const;
+
+    future<> check_access(query_processor& qp, const service::client_state& state) const override;
+
+    // Validate before execute, using client state and current schema
+    void validate(query_processor&, const service::client_state& state) const override;
+
+    bool depends_on(std::string_view ks_name, std::optional<std::string_view> cf_name) const override;
+
+    void inc_cql_stats(bool is_internal) const;
+
+    bool is_conditional() const override;
+
+    // Build a read_command instance to fetch the previous mutation from storage. The mutation is
+    // fetched if we need to check LWT conditions or apply updates to non-frozen list elements.
+    lw_shared_ptr<query::read_command> read_command(query_processor& qp, query::clustering_row_ranges ranges, db::consistency_level cl) const;
+
+    future<::shared_ptr<cql_transport::messages::result_message>>
+    execute(query_processor& qp, service::query_state& qs, const query_options& options, std::optional<service::group0_guard> guard) const override;
+
+    future<::shared_ptr<cql_transport::messages::result_message>>
+    execute_without_checking_exception_message(query_processor& qp, service::query_state& qs, const query_options& options, std::optional<service::group0_guard> guard) const override;
+
     /**
      * Convert statement into a list of mutations to apply on the server
      *
@@ -260,21 +286,7 @@ public:
      */
     future<utils::chunked_vector<mutation>> get_mutations(query_processor& qp, const query_options& options, db::timeout_clock::time_point timeout, bool local, int64_t now, service::query_state& qs, json_cache_opt& json_cache, std::vector<dht::partition_range> keys) const;
 
-    virtual json_cache_opt maybe_prepare_json_cache(const query_options& options) const;
-
-    virtual ::shared_ptr<broadcast_modification_statement> prepare_for_broadcast_tables() const;
-
     db::timeout_clock::duration get_timeout(const service::client_state& state, const query_options& options) const;
-
-protected:
-    /**
-     * If there are conditions on the statement, this is called after the where clause and conditions have been
-     * processed to check that they are compatible.
-     * @throws InvalidRequestException
-     */
-    void validate_where_clause_for_conditions() const;
-
-    friend class raw::modification_statement;
 };
 
 }

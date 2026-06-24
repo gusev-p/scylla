@@ -21,29 +21,23 @@ namespace cql3 {
 
 namespace statements {
 
-delete_statement::delete_statement(audit::audit_info_ptr&& audit_info, statement_type type, uint32_t bound_terms, schema_ptr s, std::unique_ptr<attributes> attrs, cql_stats& stats)
-        : modification_statement{type, bound_terms, std::move(s), std::move(attrs), stats}
+delete_statement_impl::delete_statement_impl(schema_ptr s, uint32_t bound_terms, std::unique_ptr<attributes> attrs)
+    : modification_statement_impl(statement_type::DELETE, {
+        .allow_clustering_key_slices = true,
+        .require_full_clustering_key = false
+    }, std::move(s), bound_terms, std::move(attrs))
 {
-    set_audit_info(std::move(audit_info));
 }
 
-bool delete_statement::require_full_clustering_key() const {
-    return false;
-}
-
-bool delete_statement::allow_clustering_key_slices() const {
-    return true;
-}
-
-void delete_statement::add_update_for_key(mutation& m, const query::clustering_range& range, const update_parameters& params, const json_cache_opt& json_cache) const {
+void delete_statement_impl::add_update_for_key(mutation& m, const query::clustering_range& range, const update_parameters& params, const json_cache_opt& json_cache) const {
     if (_column_operations.empty()) {
-        if (s->clustering_key_size() == 0 || range.is_full()) {
+        if (_schema->clustering_key_size() == 0 || range.is_full()) {
             m.partition().apply(params.make_tombstone());
         } else if (range.is_singular()) {
-            m.partition().apply_delete(*s, range.start()->value(), params.make_tombstone());
+            m.partition().apply_delete(*_schema, range.start()->value(), params.make_tombstone());
         } else {
             auto bvs = bound_view::from_range(range);
-            m.partition().apply_delete(*s, range_tombstone(bvs.first, bvs.second, params.make_tombstone()));
+            m.partition().apply_delete(*_schema, range_tombstone(bvs.first, bvs.second, params.make_tombstone()));
         }
         return;
     }
@@ -58,10 +52,11 @@ void delete_statement::add_update_for_key(mutation& m, const query::clustering_r
 
 namespace raw {
 
-::shared_ptr<cql3::statements::modification_statement>
-delete_statement::prepare_internal(data_dictionary::database db, schema_ptr schema, prepare_context& ctx,
-        std::unique_ptr<attributes> attrs, cql_stats& stats) const {
-    auto stmt = ::make_shared<cql3::statements::delete_statement>(audit_info(), statement_type::DELETE, ctx.bound_variables_size(), schema, std::move(attrs), stats);
+::shared_ptr<cql3::statements::modification_statement_impl>
+delete_statement::prepare_internal(data_dictionary::database db, schema_ptr schema, prepare_context& ctx, std::unique_ptr<attributes> attrs) const {
+    auto stmt = ::make_shared<cql3::statements::delete_statement_impl>(schema, 
+        ctx.bound_variables_size(),
+        std::move(attrs));
 
     for (auto&& deletion : _deletions) {
         auto&& id = deletion->affected_column().prepare_column_identifier(*schema);

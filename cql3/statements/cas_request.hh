@@ -24,9 +24,9 @@ using namespace std::chrono;
  * we'll have only one.
  */
 struct cas_row_update {
-    modification_statement const& statement;
+    modification_statement_impl const& statement;
     std::vector<query::clustering_range> ranges;
-    modification_statement::json_cache_opt json_cache;
+    json_cache_opt json_cache;
     // This statement query options. Different from cas_request::query_options,
     // which may stand for BATCH statement, not individual modification_statement,
     // in case of BATCH
@@ -64,8 +64,8 @@ public:
 
     lw_shared_ptr<query::read_command> read_command(query_processor& qp) const;
 
-    void add_row_update(const modification_statement& stmt_arg, std::vector<query::clustering_range> ranges_arg,
-        modification_statement::json_cache_opt json_cache_arg, const query_options& options_arg);
+    void add_row_update(const modification_statement_impl& stmt_arg, std::vector<query::clustering_range> ranges_arg,
+        json_cache_opt json_cache_arg, const query_options& options_arg);
 
     virtual std::optional<mutation> apply(foreign_ptr<lw_shared_ptr<query::result>> qr,
             const query::partition_slice& slice, api::timestamp_type ts, cdc::per_request_options&) override;

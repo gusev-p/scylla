@@ -24,9 +24,9 @@ namespace cql3::statements {
 
 using namespace std::chrono;
 
-void cas_request::add_row_update(const modification_statement& stmt_arg,
+void cas_request::add_row_update(const modification_statement_impl& stmt_arg,
         std::vector<query::clustering_range> ranges_arg,
-        modification_statement::json_cache_opt json_cache_arg,
+        json_cache_opt json_cache_arg,
         const query_options& options_arg) {
     // TODO: reserve updates array for batches
     _updates.emplace_back(cas_row_update{

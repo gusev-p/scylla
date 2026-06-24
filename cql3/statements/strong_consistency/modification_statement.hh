@@ -16,15 +16,11 @@ namespace cql3::statements::strong_consistency {
 
 class modification_statement : public cql_statement_opt_metadata {
     using result_message = cql_transport::messages::result_message;
-    using base_statement = cql3::statements::modification_statement;
+    using modification_statement_impl = cql3::statements::modification_statement_impl;
 
-    shared_ptr<base_statement> _statement;
+    shared_ptr<modification_statement_impl> _impl;
 public:
-    modification_statement(shared_ptr<base_statement> statement);
-
-    virtual shared_ptr<cql_statement> unwrap_strong_consistency_statement(const shared_ptr<cql_statement>&) const override {
-        return _statement;
-    }
+    modification_statement(shared_ptr<modification_statement_impl> impl);
 
     future<shared_ptr<result_message>> execute(query_processor& qp, service::query_state& state,
         const query_options& options, std::optional<service::group0_guard> guard) const override;

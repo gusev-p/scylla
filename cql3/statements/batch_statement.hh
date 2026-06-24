@@ -38,14 +38,14 @@ public:
     using type = raw::batch_statement::type;
 
     struct single_statement {
-        shared_ptr<modification_statement> statement;
+        shared_ptr<modification_statement_impl> statement;
         bool needs_authorization = true;
 
     public:
-        single_statement(shared_ptr<modification_statement> s)
+        single_statement(shared_ptr<modification_statement_impl> s)
             : statement(std::move(s))
         {}
-        single_statement(shared_ptr<modification_statement> s, bool na)
+        single_statement(shared_ptr<modification_statement_impl> s, bool na)
             : statement(std::move(s))
             , needs_authorization(na)
         {}

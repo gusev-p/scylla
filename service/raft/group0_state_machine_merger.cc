@@ -24,9 +24,6 @@ group0_state_machine_merger::group0_state_machine_merger(utils::UUID id, semapho
     , _db{std::move(db)} {}
 
 size_t group0_state_machine_merger::cmd_size(group0_command& cmd) {
-    if (holds_alternative<broadcast_table_query>(cmd.change)) {
-        return 0;
-    }
     auto r = get_command_mutations(cmd) | std::views::transform([] (const canonical_mutation& m) { return m.representation().size(); });
     return std::accumulate(std::begin(r), std::end(r), size_t(0));
 }
@@ -34,7 +31,7 @@ size_t group0_state_machine_merger::cmd_size(group0_command& cmd) {
 bool group0_state_machine_merger::can_merge(group0_command& cmd, size_t s) const {
     if (!_cmd_to_merge.empty()) {
         // broadcast table commands or different type of commands cannot be merged
-        if (_cmd_to_merge[0].change.index() != cmd.change.index() || holds_alternative<broadcast_table_query>(cmd.change)) {
+        if (_cmd_to_merge[0].change.index() != cmd.change.index()) {
             return false;
         }
     }
@@ -71,9 +68,6 @@ utils::chunked_vector<canonical_mutation>& group0_state_machine_merger::get_comm
     return std::visit(make_visitor(
         [] (schema_change& chng) -> utils::chunked_vector<canonical_mutation>& {
             return chng.mutations;
-        },
-        [] (broadcast_table_query& query) -> utils::chunked_vector<canonical_mutation>& {
-            on_internal_error(slogger, "trying to merge broadcast table command");
         },
         [] (topology_change& chng) -> utils::chunked_vector<canonical_mutation>& {
             return chng.mutations;
