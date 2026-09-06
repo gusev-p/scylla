@@ -5801,6 +5801,114 @@ future<> table::cleanup_tablet_without_deallocation(database& db, db::system_key
     co_await cleanup_compaction_groups(db, sys_ks, tid, sg);
 }
 
+future<> table::truncate_tablet_locally(database& db, locator::tablet_id tid) {
+    auto holder = async_gate().hold();
+    auto& sg = storage_group_for_id(tid.value());
+    auto sg_holder = sg.async_gate().hold();
+    auto cgs = sg.compaction_groups_immediate();
+
+    // Compaction stays disabled until the reenablers go out of scope, so no
+    // compaction output is added to the sstable sets between capturing them
+    // for deletion and swapping in the empty ones below.
+    std::vector<compaction::compaction_reenabler> cres;
+    for (auto& cg : cgs) {
+        for (auto* view : cg->all_views()) {
+            cres.push_back(co_await _compaction_manager.stop_and_disable_compaction("truncate", *view));
+        }
+    }
+
+    co_await clear_inactive_reads_for_tablet(db, sg);
+
+    // Replaces the memtable lists and the sstable sets of all compaction groups
+    // in one synchronous step. A reader created before the step holds the old
+    // memtables and the old sstable set; a reader created after it sees an empty
+    // tablet. Dropping the two in separate steps would let a reader created in
+    // between combine the empty memtables with the old sstables, and return a
+    // value that a later write had already overwritten.
+    class tablet_truncater : public row_cache::external_updater_impl {
+        table& _t;
+        const utils::small_vector<compaction_group_ptr, 3>& _cgs;
+        std::vector<shared_memtable>& _old_memtables;
+        std::vector<lw_shared_ptr<sstables::sstable_set>> _empty_main_sets;
+        std::vector<lw_shared_ptr<sstables::sstable_set>> _empty_maintenance_sets;
+    public:
+        tablet_truncater(table& t, const utils::small_vector<compaction_group_ptr, 3>& cgs,
+                std::vector<shared_memtable>& old_memtables)
+                : _t(t)
+                , _cgs(cgs)
+                , _old_memtables(old_memtables)
+        {
+            for (auto& cg : _cgs) {
+                _empty_main_sets.push_back(make_lw_shared<sstables::sstable_set>(cg->make_main_sstable_set()));
+                _empty_maintenance_sets.push_back(make_lw_shared<sstables::sstable_set>(cg->make_main_sstable_set()));
+            }
+        }
+        virtual future<> prepare() override {
+            // Captured with compaction disabled and the sstable list permit held,
+            // so the set cannot change before execute() swaps it out.
+            for (auto& cg : _cgs) {
+                auto set = cg->make_sstable_set();
+                auto& pending = cg->_sstables_compacted_but_not_deleted;
+                pending.reserve(set->size() + pending.size());
+                set->for_each_sstable([&] (const sstables::shared_sstable& sst) {
+                    pending.push_back(sst);
+                });
+            }
+            return make_ready_future<>();
+        }
+        virtual void execute() override {
+            for (auto& cg : _cgs) {
+                std::ranges::move(cg->_memtables->clear_and_add(), std::back_inserter(_old_memtables));
+            }
+            for (size_t i = 0; i < _cgs.size(); ++i) {
+                _cgs[i]->set_main_sstables(std::move(_empty_main_sets[i]));
+                _cgs[i]->set_maintenance_sstables(std::move(_empty_maintenance_sets[i]));
+            }
+            _t.refresh_compound_sstable_set();
+        }
+    };
+
+    std::vector<shared_memtable> old_memtables;
+    auto p_range = to_partition_range(sg.token_range());
+    {
+        // Flush permits first: a flush in progress holds one and may be waiting
+        // for the sstable list permit to add its output. Holding all of them
+        // across the swap also ensures no flush is mid-way on a memtable we drop,
+        // which would otherwise land pre-truncate data in a new sstable later.
+        auto flush_permits = co_await _config.dirty_memory_manager->get_all_flush_permits();
+        auto list_permit = co_await get_sstable_list_permit();
+        co_await _cache.invalidate(row_cache::external_updater(
+                std::make_unique<tablet_truncater>(*this, cgs, old_memtables)), p_range);
+        rebuild_statistics();
+
+        if (uses_logstor()) {
+            co_await logstor_index().erase(p_range);
+            for (auto& cg : cgs) {
+                co_await cg->discard_logstor_segments();
+            }
+        }
+
+        for (auto& cg : cgs) {
+            if (cg->_sstables_compacted_but_not_deleted.empty()) {
+                continue;
+            }
+            auto gh = _sstable_deletion_gate.hold();
+            auto deletion = make_atomic_deletion(cg->_sstables_compacted_but_not_deleted);
+            co_await deletion.commit();
+            cg->_sstables_compacted_but_not_deleted.clear();
+            co_await deletion.execute();
+        }
+        rebuild_statistics();
+    }
+
+    for (auto& mt : old_memtables) {
+        if (commitlog()) {
+            commitlog()->discard_completed_segments(schema()->id(), mt->get_and_discard_rp_set());
+        }
+        co_await mt->clear_gently();
+    }
+}
+
 shard_id table::shard_for_reads(dht::token t) const {
     return _erm ? _erm->shard_for_reads(*_schema, t)
                 : dht::static_shard_of(*_schema, t); // for tests.
