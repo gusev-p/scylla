@@ -4169,3 +4169,80 @@ BOOST_AUTO_TEST_CASE(test_follower_notifies_leader_when_log_shrinks) {
         BOOST_CHECK(!std::holds_alternative<raft::append_reply>(msg));
     }
 }
+
+// The applier fiber may take a second snapshot before io_fiber polls the fsm
+// output holding the first. The output then carries only the second, but
+// both snapshots replaced on the way have to be dropped (see 210d9dd026c).
+BOOST_AUTO_TEST_CASE(test_snapshots_replaced_before_output_is_polled_are_dropped) {
+    follower_log_limit_fixture f;
+    const auto s0 = raft::snapshot_id::create_random_id();
+    raft::log log{raft::snapshot_descriptor{
+            .idx = index_t{0}, .term = term_t{1}, .config = f.cfg, .id = s0}};
+    fsm_debug fsm(f.follower_id, term_t{1}, server_id{}, std::move(log),
+            trivial_failure_detector, f.config(10));
+    fsm.step(f.leader_id, f.request(index_t{0}, term_t{0}, 3, index_t{3}));
+    (void) fsm.get_output();
+
+    const raft::snapshot_descriptor s1{.idx = index_t{1}, .term = term_t{1}, .config = f.cfg,
+            .id = raft::snapshot_id::create_random_id()};
+    const raft::snapshot_descriptor s2{.idx = index_t{2}, .term = term_t{1}, .config = f.cfg,
+            .id = raft::snapshot_id::create_random_id()};
+    BOOST_REQUIRE(fsm.apply_snapshot(s1, 0, 0, true));
+    BOOST_REQUIRE(fsm.apply_snapshot(s2, 0, 0, true));
+
+    auto output = fsm.get_output();
+    BOOST_REQUIRE(output.snp);
+    BOOST_CHECK(output.snp->snp.id == s2.id);
+    BOOST_REQUIRE_EQUAL(output.snps_to_drop.size(), 2);
+    BOOST_CHECK(output.snps_to_drop[0] == s0);
+    BOOST_CHECK(output.snps_to_drop[1] == s1.id);
+}
+
+// A snapshot received from another server is in the state machine before the
+// fsm sees it, so each one the fsm doesn't adopt has to be dropped, whatever
+// the reason it isn't adopted. The snapshot in use is the exception: it may
+// be transferred again, and dropping it then would drop the one in use.
+BOOST_AUTO_TEST_CASE(test_received_snapshots_not_adopted_are_dropped) {
+    follower_log_limit_fixture f;
+    const auto s0 = raft::snapshot_id::create_random_id();
+    raft::log log{raft::snapshot_descriptor{
+            .idx = index_t{0}, .term = term_t{1}, .config = f.cfg, .id = s0}};
+    fsm_debug fsm(f.follower_id, term_t{1}, server_id{}, std::move(log),
+            trivial_failure_detector, f.config(10));
+
+    auto received = [&] (index_t idx) {
+        return raft::snapshot_descriptor{.idx = idx, .term = term_t{1}, .config = f.cfg,
+                .id = raft::snapshot_id::create_random_id()};
+    };
+    auto dropped = [&] {
+        auto output = fsm.get_output();
+        return std::vector<raft::snapshot_id>(output.snps_to_drop.begin(), output.snps_to_drop.end());
+    };
+
+    // Adopted: the snapshot it replaces is dropped.
+    const auto s1 = received(index_t{5});
+    fsm.step(f.leader_id, raft::install_snapshot{term_t{1}, s1});
+    BOOST_CHECK(dropped() == std::vector{s0});
+
+    // The snapshot in use, transferred again: kept.
+    fsm.step(f.leader_id, raft::install_snapshot{term_t{1}, s1});
+    BOOST_CHECK(dropped().empty());
+
+    // Older than the snapshot in use.
+    const auto outdated = received(index_t{3});
+    fsm.step(f.leader_id, raft::install_snapshot{term_t{1}, outdated});
+    BOOST_CHECK(dropped() == std::vector{outdated.id});
+
+    // Sent by a leader of an earlier term.
+    const auto stale = received(index_t{10});
+    fsm.step(f.leader_id, raft::install_snapshot{term_t{0}, stale});
+    BOOST_CHECK(dropped() == std::vector{stale.id});
+
+    // Turned away by the server before it reaches the fsm, as a transfer
+    // from a sender whose previous one is still being processed.
+    const auto duplicate = raft::snapshot_id::create_random_id();
+    fsm.drop_received_snapshot(duplicate);
+    BOOST_CHECK(dropped() == std::vector{duplicate});
+    fsm.drop_received_snapshot(s1.id);
+    BOOST_CHECK(dropped().empty());
+}

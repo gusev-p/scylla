@@ -756,6 +756,14 @@ public:
     // the passed snapshot will be dropped in this case.
     bool apply_snapshot(snapshot_descriptor snp, size_t max_trailing_entries, size_t max_trailing_bytes, bool local);
 
+    // Has the state machine drop a snapshot received from another server
+    // that this one doesn't adopt. The rpc stores a received snapshot before
+    // raft sees it, so every one has to end up either adopted or dropped, or
+    // it is never dropped. The snapshot in use is kept: a snapshot can be
+    // transferred again after it was adopted (see
+    // server_impl::apply_snapshot()), and then the id names that one.
+    void drop_received_snapshot(snapshot_id id);
+
     std::optional<std::pair<read_id, index_t>> start_read_barrier(server_id requester);
 
     size_t in_memory_log_size() const {
@@ -818,6 +826,7 @@ void fsm::step(server_id from, const leader& s, Message&& msg) {
     } else if constexpr (std::is_same_v<Message, vote_request>) {
         request_vote(from, std::move(msg));
     } else if constexpr (std::is_same_v<Message, install_snapshot>) {
+        drop_received_snapshot(msg.snp.id);
         send_to(from, snapshot_reply{.current_term = _current_term,
                      .success = false });
     } else if constexpr (std::is_same_v<Message, snapshot_reply>) {
@@ -834,6 +843,7 @@ void fsm::step(server_id from, const candidate& c, Message&& msg) {
     } else if constexpr (std::is_same_v<Message, vote_reply>) {
         request_vote_reply(from, std::move(msg));
     } else if constexpr (std::is_same_v<Message, install_snapshot>) {
+        drop_received_snapshot(msg.snp.id);
         send_to(from, snapshot_reply{.current_term = _current_term,
                      .success = false });
     } else if constexpr (std::is_same_v<Message, append_reply>) {
@@ -922,6 +932,7 @@ void fsm::step(server_id from, Message&& msg) {
             append_reply reply{_current_term, _commit_idx, append_reply::rejected{index_t{}, _log.last_idx()}};
             send_to(from, std::move(reply));
         } else if constexpr (std::is_same_v<Message, install_snapshot>) {
+            drop_received_snapshot(msg.snp.id);
             send_to(from, snapshot_reply{.current_term = _current_term,
                     .success = false});
         } else if constexpr (std::is_same_v<Message, vote_request>) {

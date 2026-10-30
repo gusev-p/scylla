@@ -1534,7 +1534,11 @@ bool fsm::apply_snapshot(snapshot_descriptor snp, size_t max_trailing_entries, s
     if (snp.idx <= current_snp.idx || (!local && snp.idx <= _commit_idx)) {
         logger.error("apply_snapshot[{}]: ignore outdated snapshot {}/{} current one is {}/{}, commit_idx={}",
                         _tag, snp.id, snp.idx, current_snp.id, current_snp.idx, _commit_idx);
-        _output.snps_to_drop.push_back(snp.id);
+        if (local) {
+            _output.snps_to_drop.push_back(snp.id);
+        } else {
+            drop_received_snapshot(snp.id);
+        }
         return false;
     }
 
@@ -1569,7 +1573,7 @@ bool fsm::apply_snapshot(snapshot_descriptor snp, size_t max_trailing_entries, s
                         " The leader will transfer it again, which wastes the transfer just made"
                         " -- expensive for a large snapshot.",
                         _tag, snp.id, snp.idx, _commit_idx, _observed._commit_idx);
-        _output.snps_to_drop.push_back(snp.id);
+        drop_received_snapshot(snp.id);
         return false;
     }
 
@@ -1611,6 +1615,14 @@ bool fsm::apply_snapshot(snapshot_descriptor snp, size_t max_trailing_entries, s
     }
     _sm_events.signal();
     return true;
+}
+
+void fsm::drop_received_snapshot(snapshot_id id) {
+    if (id == _log.get_snapshot().id) {
+        return;
+    }
+    _output.snps_to_drop.push_back(id);
+    _sm_events.signal();
 }
 
 void fsm::transfer_leadership(logical_clock::duration timeout, server_id target) {

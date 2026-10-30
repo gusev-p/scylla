@@ -1586,8 +1586,10 @@ public:
         }
     }
 
-    raft::server* get_server() {
-        return _server.get();
+    // Shared with the state machine, the rpc and the persistence: what the
+    // state machine took or loaded, and what the rpc received, until dropped.
+    const snapshots_t<typename M::state_t>& snapshots() const {
+        return *_snapshots;
     }
 
 private:
@@ -2397,9 +2399,11 @@ SEASTAR_TEST_CASE(test_frequent_snapshotting) {
         // unconsumed output, with or without the applier queue bound the test
         // used to set for that purpose.
         //
-        // What it still does is drive snapshotting hard: snapshot_threshold = 1
-        // snapshots after every applied batch. Covering the replacement itself
-        // again would take a deliberate io_fiber delay.
+        // test_snapshots_replaced_before_output_is_polled_are_dropped in
+        // fsm_test covers the replacement directly. This test still drives
+        // snapshotting hard: snapshot_threshold = 1 snapshots after every
+        // applied batch. At the end, it checks that nothing a server took or
+        // received outlives its use.
 
         tlogger.debug("Started 2 more servers, changing configuration");
 
@@ -2426,6 +2430,37 @@ SEASTAR_TEST_CASE(test_frequent_snapshotting) {
         }
 
         tlogger.debug("100 concurrent reads - three servers - passed");
+
+        // Every snapshot a server took or received has to be dropped once it
+        // isn't used, so with the cluster quiet, each server is left with
+        // only the one it uses. Quiet takes a few ticks: the followers learn
+        // the last commit index from the leader's next messages, then apply
+        // and snapshot the remaining entries.
+        //
+        // The check is made here rather than when the servers are stopped:
+        // an aborted server doesn't drop the snapshots it was about to.
+        auto all_settled = [&] {
+            bool settled = true;
+            env.for_each_server([&] (raft::server_id, raft_server<ExReg>* srv) {
+                settled = settled && (!srv || srv->snapshots().size() == 1);
+            });
+            return settled;
+        };
+        const auto settle_deadline = timer.now() + 1000_t;
+        while (!all_settled() && timer.now() < settle_deadline) {
+            co_await timer.sleep(10_t);
+        }
+        env.for_each_server([&] (raft::server_id id, raft_server<ExReg>* srv) {
+            if (!srv) {
+                return;
+            }
+            std::vector<raft::snapshot_id> snapshot_ids;
+            for (const auto& p: srv->snapshots()) {
+                snapshot_ids.push_back(p.first);
+            }
+            BOOST_CHECK_MESSAGE(snapshot_ids.size() == 1,
+                    seastar::format("server {} keeps snapshots [{}]", id, snapshot_ids));
+        });
     });
 
     tlogger.debug("Finished");

@@ -1770,6 +1770,8 @@ future<snapshot_reply> server_impl::apply_snapshot(server_id from, install_snaps
         } catch (...) {
             logger.error("apply_snapshot[{}] failed with {:t}", _tag, std::current_exception());
         }
+    } else {
+        _fsm->drop_received_snapshot(snp.snp.id);
     }
     co_return reply;
 }
