@@ -304,8 +304,10 @@ public:
         {}
         named_file(named_file&&) = default;
 
+        using sync_dir = bool_class<class sync_dir_tag>;
+
         future<> open(open_flags, file_open_options, std::optional<uint64_t> size_in = std::nullopt) noexcept;
-        future<> rename(std::string_view to);
+        future<> rename(std::string_view to, sync_dir);
 
         // NOT overrides. Nothing virtual. Will rely on exact type
         template <typename CharType>
@@ -533,6 +535,15 @@ private:
 
     size_t max_request_controller_units() const;
     segment_id_type _ids = 0, _low_id = 0;
+    // Ids of segments that left _segments while their file can still be replayed:
+    // it is on disk under its own name, or its removal or recycling rename is not
+    // durable yet. Every exit from _segments must register here, since that is
+    // where min_position() stops seeing the segment.
+    // An id is erased only by do_pending_deletes(), after the directory sync that
+    // makes its file's disposal durable. That relies on ~segment queueing the file
+    // of every clean segment (dispose_mode::Delete). A dirty segment's file
+    // (dispose_mode::Keep) is left for replay, so its id stays for good.
+    std::vector<segment_id_type> _pending_disposal;
     std::vector<sseg_ptr> _segments;
     queue<sseg_ptr> _reserve_segments;
     queue<named_file> _recycled_segments;
@@ -563,14 +574,16 @@ future<> db::commitlog::segment_manager::named_file::open(open_flags flags, file
     assign(std::move(f), existing_size);
 }
 
-future<> db::commitlog::segment_manager::named_file::rename(std::string_view to) {
+future<> db::commitlog::segment_manager::named_file::rename(std::string_view to, sync_dir sync) {
     SCYLLA_ASSERT(!*this);
     try {
         auto s = sstring(to);
         auto dir = std::filesystem::path(to).parent_path();
         co_await seastar::rename_file(_name, s);
         _name = std::move(s);
-        co_await seastar::sync_directory(dir.string());
+        if (sync) {
+            co_await seastar::sync_directory(dir.string());
+        }
     } catch (...) {
         commit_error_handler(std::current_exception());
         throw;
@@ -879,6 +892,8 @@ public:
 
         _segment_manager->totals.buffer_list_bytes -= _buffer.size_bytes();
 
+        // A clean segment's file must always be queued: its id leaves
+        // _pending_disposal only when do_pending_deletes() disposes of the file.
         if (mode != dispose_mode::Keep || _file) {
             _segment_manager->add_file_to_dispose(std::move(_file), mode);
         }
@@ -1570,11 +1585,11 @@ public:
 };
 
 db::replay_position db::commitlog::segment_manager::min_position() const {
-    if (_segments.empty()) {
-        return {_ids, 0};
-    } else {
-        return {_segments.front()->_desc.id, 0};
+    auto id = _segments.empty() ? _ids : _segments.front()->_desc.id;
+    if (!_pending_disposal.empty()) {
+        id = std::min(id, std::ranges::min(_pending_disposal));
     }
+    return {id, 0};
 }
 
 db::replay_position db::commitlog::segment_manager::current_position() const {
@@ -1962,7 +1977,12 @@ future<> db::commitlog::segment_manager::oversized_allocation(entry_writer& writ
             s->reset_file_position(fp);
             if (fp == 0) {
                 s->mark_clean();
-                _segments.erase(std::remove(_segments.begin(), _segments.end(), s), _segments.end());
+                // A sweep during the syncs above may have removed and registered s already.
+                auto it = std::remove(_segments.begin(), _segments.end(), s);
+                if (it != _segments.end()) {
+                    _pending_disposal.push_back(s->_desc.id);
+                    _segments.erase(it, _segments.end());
+                }
             }
         }
     }
@@ -2532,7 +2552,9 @@ future<db::commitlog::segment_manager::sseg_ptr> db::commitlog::segment_manager:
             // that recycled the file we could potentially have
             // out-of-order files. (Sort does not help).
             clogger.debug("Using recycled segment file {} -> {} ({} MB)", f.name(), dst, f.known_size()/(1024*1024));
-            co_await f.rename(dst);
+            // Synced before the segment takes writes: should the rename be lost in a
+            // crash, the file comes back as Recycled-* and replay skips acknowledged writes.
+            co_await f.rename(dst, named_file::sync_dir::yes);
             co_return co_await allocate_segment_ex(std::move(d), std::move(f), flags);
         }
 
@@ -2711,9 +2733,10 @@ void db::commitlog::segment_manager::discard_unused_segments() noexcept {
     // #25709 ensure we don't free any segment until after prune.
     {
         auto tmp = _segments; 
-        std::erase_if(_segments, [=](sseg_ptr s) {
+        std::erase_if(_segments, [this](sseg_ptr s) {
             if (s->can_delete()) {
                 clogger.debug("Segment {} is unused", *s);
+                _pending_disposal.push_back(s->_desc.id);
                 return true;
             }
             if (s->is_still_allocating()) {
@@ -2937,11 +2960,18 @@ future<> db::commitlog::segment_manager::do_pending_deletes() {
 
     promise<> deleting_done;
     auto pending_deletes = std::exchange(_pending_deletes, deleting_done.get_future());
+    // Released on every exit: an unset promise would fail every later pass with
+    // broken_promise, and no file would be disposed of again.
+    auto release_next_pass = defer([&deleting_done] () noexcept { deleting_done.set_value(); });
 
     co_await std::move(pending_deletes);
 
     std::exception_ptr recycle_error;
     auto exts = cfg.extensions;
+    // Ids of the files this pass renames or removes. They leave _pending_disposal
+    // only after the directory sync below makes that durable.
+    std::vector<segment_id_type> disposed;
+    disposed.reserve(ftd.size());
 
     clogger.debug("Discarding segments {}", ftd);
 
@@ -2958,6 +2988,9 @@ future<> db::commitlog::segment_manager::do_pending_deletes() {
             if (mode == dispose_mode::Keep) {
                 continue;
             }
+
+            // Read before the rename below changes the name.
+            const auto id = descriptor(f.name(), cfg.fname_prefix).id;
 
             if (exts && !exts->commitlog_file_extensions().empty()) {
                 for (auto& ext : exts->commitlog_file_extensions()) {
@@ -2977,7 +3010,9 @@ future<> db::commitlog::segment_manager::do_pending_deletes() {
                 // data is not replayed. Changing the name will
                 // cause header ID to be invalid in the file -> ignored
                 try {
-                    co_await f.rename(dst);
+                    // The sync at the end of the pass covers this rename too.
+                    co_await f.rename(dst, named_file::sync_dir::no);
+                    disposed.push_back(id);
                     auto b = _recycled_segments.push(std::move(f));
                     SCYLLA_ASSERT(b); // we set this to max_size_t so...
                     continue;
@@ -2991,6 +3026,7 @@ future<> db::commitlog::segment_manager::do_pending_deletes() {
             clogger.debug("Deleting segment file {}", f.name());
             // last resort.
             co_await f.remove_file();
+            disposed.push_back(id);
         } catch (...) {
             clogger.error("Could not delete segment {}: {:t}", f.name(), std::current_exception());
         }
@@ -3010,10 +3046,27 @@ future<> db::commitlog::segment_manager::do_pending_deletes() {
     if (recycle_error && _recycled_segments.empty()) {
         abort_recycled_list(recycle_error);
     }
-    deleting_done.set_value();
+
+    if (disposed.empty()) {
+        co_return;
+    }
+    // Renames and unlinks reach the disk with the directory: until it is synced, a
+    // crash can bring a file back under its replayable name. On a failed sync the
+    // ids stay, and an I/O error has already isolated the node.
+    try {
+        co_await commit_io_check(sync_directory, cfg.commit_log_location);
+        std::erase_if(_pending_disposal, [&] (segment_id_type id) {
+            return std::ranges::find(disposed, id) != disposed.end();
+        });
+    } catch (...) {
+        clogger.error("Could not sync commitlog directory {}: {:t}", cfg.commit_log_location, std::current_exception());
+    }
 }
 
 future<> db::commitlog::segment_manager::orphan_all() {
+    for (auto& s : _segments) {
+        _pending_disposal.push_back(s->_desc.id);
+    }
     // #25709. the actual process of destroying the elements here
     // might cause a call into discard_unused_segments.
     // ensure the target vector is empty when we get to destructors

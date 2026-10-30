@@ -391,9 +391,10 @@ public:
      */
     gc_clock::time_point min_gc_time(const cf_id_type&, const db::replay_position& rp_filter = {}) const;
 
-    // Return the lowest possible replay position across all existing or future commitlog segments.
-    // In other words, only positions greater or equal to min_position() can
-    // be replayed on the next reboot.
+    // The lowest replay position that this instance's segments can still produce on
+    // the next reboot: the segments it holds, plus the ones it dropped whose file is
+    // not durably removed or recycled yet. Files left by a previous boot and not yet
+    // deleted are not covered.
     replay_position min_position() const;
 
     // How far the flush requests have got: every closed segment at or below this
